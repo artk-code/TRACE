@@ -43,14 +43,26 @@ pnpm install
 ```
 
 ## Build + Test
-1. Rust workspace regression:
+1. Rust formatting gate:
+```bash
+rustup run stable cargo fmt --all --check
+```
+2. Rust lint gate:
+```bash
+rustup run stable cargo clippy --workspace --all-targets -- -D warnings
+```
+3. Rust workspace regression:
 ```bash
 rustup run stable cargo test --workspace
 ```
-2. Web regression:
+4. Web regression:
 ```bash
 pnpm --dir web test
 pnpm --dir web build
+```
+5. Browser E2E (planned, not landed yet):
+```bash
+pnpm --dir web test:e2e
 ```
 
 ## Local Run (Server + Web)
@@ -71,6 +83,16 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
    - `Status`
    - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
+
+## Web UI Status (2026-02-28)
+- Current UI supports:
+  - Codex auth preflight check.
+  - tmux orchestration controls (`start`, `status`, `add-lane`, `add-pane`, `stop`).
+  - Read-only task/candidate/output views.
+- Not yet implemented in UI:
+  - `Run Smoke` action (`POST /smoke/runs`).
+  - Smoke-run status polling (`GET /smoke/runs/{run_id}`).
+  - Report retrieval and rendering (`GET /reports`, `GET /reports/{report_id}`).
 
 ## Codex Auth Policy + Preflight
 TRACE exposes a Codex auth status endpoint and enforces auth at lane-spawn time.
@@ -128,6 +150,65 @@ References:
 - https://developers.openai.com/codex/auth
 - https://developers.openai.com/codex/cli
 
+## Tmux Operator Runbook (CLI)
+1. Start session:
+```bash
+scripts/trace-smoke-tmux.sh start
+```
+2. Verify session and panes:
+```bash
+scripts/trace-smoke-tmux.sh status
+```
+3. Validate pane target before smoke workflow:
+```bash
+scripts/trace-smoke-tmux.sh validate-target trace-smoke:lanes
+```
+4. Optional runner lane spawn:
+```bash
+scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes runner
+```
+5. Stop session:
+```bash
+scripts/trace-smoke-tmux.sh stop
+```
+
+## Smoke Workflow API Contract
+`POST /smoke/runs`
+
+Request JSON:
+- `session` optional string, default `trace-smoke`.
+- `profiles` optional array of profile tokens, default `["flash","high","extra"]`.
+- `target` optional string, default `<session>:lanes`.
+- `runner_timeout_sec` optional integer in `[1, 3600]`, default `180`.
+- `report_id` optional string, sanitized server-side for report filenames.
+
+Behavior:
+- Enforces Codex auth policy for lane spawn.
+- Preflights tmux session via `status`.
+- Preflights tmux target via `validate-target`.
+- Rejects concurrent active run per tmux session.
+- Bounds in-memory run history via `TRACE_SMOKE_RUN_HISTORY_LIMIT` (default `200`).
+
+Success response:
+- HTTP `202 Accepted`.
+- Returns queued `SmokeRunResponse` with:
+  - `run_id`, `status`, `current_step`, `session`, `target`, `profiles`, `lane_names`.
+
+`GET /smoke/runs/{run_id}`
+- Returns current `SmokeRunResponse`.
+- Terminal success includes:
+  - `report_id`, `json_report_path`, `markdown_report_path`, `summary`.
+- Missing run id returns HTTP `404`.
+
+Smoke run states:
+- `queued` -> `running` -> (`succeeded` | `failed`)
+- Common `current_step` values:
+  - `queued`
+  - `spawning_lanes`
+  - `waiting_for_lanes`
+  - `evaluating_benchmark`
+  - `completed`
+
 ## API Smoke (No Browser)
 ```bash
 curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .
@@ -140,16 +221,44 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/status \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke"}'
 
+scripts/trace-smoke-tmux.sh --session trace-web-smoke validate-target trace-web-smoke:lanes
+
 RUN_ID="$(curl -sS -X POST http://127.0.0.1:18086/smoke/runs \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke","target":"trace-web-smoke:lanes"}' | jq -r '.run_id')"
 
-curl -sS "http://127.0.0.1:18086/smoke/runs/$RUN_ID" | jq .
+while true; do
+  STATUS="$(curl -sS "http://127.0.0.1:18086/smoke/runs/$RUN_ID" | tee /tmp/trace-smoke-run.json | jq -r '.status')"
+  if [[ "$STATUS" == "succeeded" || "$STATUS" == "failed" ]]; then
+    break
+  fi
+  sleep 1
+done
+
+cat /tmp/trace-smoke-run.json | jq .
 
 curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/stop \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke"}'
 ```
+
+Note:
+- `/reports` APIs are not implemented yet.
+- Use `json_report_path` / `markdown_report_path` from smoke-run terminal response for now.
+
+## Troubleshooting
+- `412 Precondition Failed` on `add-lane`/`add-pane`:
+  - Codex auth policy is `required` and `codex login status` is not logged in.
+- `409 Conflict` from `POST /smoke/runs` with `smoke run already active`:
+  - Another smoke run is already active for that tmux session.
+- `409 Conflict` from `POST /smoke/runs` mentioning `status`:
+  - tmux session preflight failed; start session first.
+- `409 Conflict` from `POST /smoke/runs` mentioning `validate-target`:
+  - target pane/window does not exist; validate or adjust target.
+- `409 Conflict` mentioning `history limit reached`:
+  - increase `TRACE_SMOKE_RUN_HISTORY_LIMIT` or wait for terminal runs to be pruned.
+- `400 Bad Request` on smoke start:
+  - invalid token characters in `session`/`profiles`/`target`, or invalid `runner_timeout_sec`.
 
 ## Current Status
 - Monorepo scaffold is in place (Rust + TypeScript workspace).
