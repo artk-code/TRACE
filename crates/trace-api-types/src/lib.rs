@@ -103,7 +103,7 @@ pub fn decode_output_chunk(
 ) -> Result<String, OutputDecodeError> {
     match chunk.encoding {
         OutputEncoding::Utf8 => {
-            let byte_len = chunk.chunk.as_bytes().len();
+            let byte_len = chunk.chunk.len();
             if byte_len > max_bytes {
                 return Err(OutputDecodeError::ExceedsSizeLimit {
                     limit_bytes: max_bytes,

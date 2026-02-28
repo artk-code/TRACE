@@ -8,16 +8,21 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
+use serde_json::Value;
 use thiserror::Error;
 use tower_http::trace::TraceLayer;
 use trace_api_types::{
     CandidateSummary, OutputEncoding, RunOutputChunk, StatusDetail, Task, TaskResponse, TaskStatus,
     TimelineEvent,
 };
+use trace_events::{
+    validate_runner_output_payload, EventKind, OutputEncoding as EventOutputEncoding,
+    OutputStream as EventOutputStream, TraceEvent,
+};
 use trace_lease::{
     GuardError, LeaseStoreError, ReplayCheckpointStore, ReplayState, WorkspaceGuard,
 };
-use trace_normalizer::{classify_candidate, filter_candidates};
+use trace_normalizer::{classify_candidate, filter_candidates, DISQUALIFIED_REASON_STALE_EPOCH};
 use trace_store::EventStore;
 
 pub const PHASE0_ENDPOINTS: [&str; 6] = [
@@ -48,66 +53,136 @@ pub struct TraceApi {
     output_by_run: HashMap<String, Vec<RunOutputChunk>>,
 }
 
+#[derive(Debug, Clone)]
+struct TaskProjectionState {
+    title: Option<String>,
+    owner: Option<String>,
+    status: TaskStatus,
+    status_detail: Option<StatusDetail>,
+    current_epoch: u64,
+}
+
+impl Default for TaskProjectionState {
+    fn default() -> Self {
+        Self {
+            title: None,
+            owner: None,
+            status: TaskStatus::Unclaimed,
+            status_detail: None,
+            current_epoch: 0,
+        }
+    }
+}
+
 impl TraceApi {
-    pub fn sample() -> Self {
-        let task = TaskResponse {
-            task: Task {
-                task_id: "TASK-42".to_string(),
-                title: "Improve lease replay".to_string(),
-                owner: Some("platform".to_string()),
-            },
-            status: TaskStatus::Claimed,
-            status_detail: Some(StatusDetail {
-                lease_epoch: Some(7),
-                holder: Some("agent-3".to_string()),
-                reason: None,
-            }),
-        };
+    pub fn from_root(root: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let store = EventStore::new(root);
+        Self::from_store(&store)
+    }
 
-        let task_event = TimelineEvent {
-            kind: "task.claimed".to_string(),
-            ts: "2026-02-28T05:20:18.123Z".to_string(),
-            task_id: "TASK-42".to_string(),
-            run_id: None,
-        };
+    pub fn from_store(store: &EventStore) -> Result<Self, std::io::Error> {
+        let events = store.read_all_events()?;
+        Ok(Self::from_events(events))
+    }
 
-        let run_event = TimelineEvent {
-            kind: "run.started".to_string(),
-            ts: "2026-02-28T05:21:01.000Z".to_string(),
-            task_id: "TASK-42".to_string(),
-            run_id: Some("RUN-13".to_string()),
-        };
+    pub fn from_events(mut events: Vec<TraceEvent>) -> Self {
+        events.sort_by_key(|event| event.global_seq);
 
-        let candidates = vec![
-            classify_candidate("C-100", "TASK-42", "RUN-13", 7, 7),
-            classify_candidate("C-099", "TASK-42", "RUN-12", 6, 7),
-        ];
+        let mut task_states: HashMap<String, TaskProjectionState> = HashMap::new();
+        let mut task_timeline: HashMap<String, Vec<TimelineEvent>> = HashMap::new();
+        let mut run_timeline: HashMap<String, Vec<TimelineEvent>> = HashMap::new();
+        let mut candidates_by_task: HashMap<String, Vec<CandidateSummary>> = HashMap::new();
+        let mut output_by_run: HashMap<String, Vec<RunOutputChunk>> = HashMap::new();
 
-        let output_chunks = vec![RunOutputChunk {
-            stream: "stdout".to_string(),
-            encoding: OutputEncoding::Utf8,
-            chunk: "hello from RUN-13".to_string(),
-            chunk_index: 0,
-            final_chunk: true,
-        }];
+        for event in events {
+            let task_id = event.task_id.clone();
+            let timeline_event = TimelineEvent {
+                kind: event_kind_name(&event.kind),
+                ts: event.ts.clone(),
+                task_id: task_id.clone(),
+                run_id: event.run_id.clone(),
+            };
 
-        let mut task_timeline = HashMap::new();
-        task_timeline.insert(
-            "TASK-42".to_string(),
-            vec![task_event.clone(), run_event.clone()],
-        );
+            task_timeline
+                .entry(task_id.clone())
+                .or_default()
+                .push(timeline_event.clone());
 
-        let mut run_timeline = HashMap::new();
-        run_timeline.insert("RUN-13".to_string(), vec![run_event]);
+            if let Some(run_id) = &event.run_id {
+                run_timeline
+                    .entry(run_id.clone())
+                    .or_default()
+                    .push(timeline_event);
+            }
 
-        let mut candidates_by_task = HashMap::new();
-        candidates_by_task.insert("TASK-42".to_string(), candidates);
+            let state = task_states.entry(task_id.clone()).or_default();
+            hydrate_task_metadata(state, &event.payload, &task_id);
 
-        let mut output_by_run = HashMap::new();
-        output_by_run.insert("RUN-13".to_string(), output_chunks);
+            match &event.kind {
+                EventKind::TaskClaimed | EventKind::TaskRenewed => {
+                    apply_claim_event(state, &event.payload);
+                }
+                EventKind::TaskReleased => {
+                    apply_release_event(state, &event.payload);
+                }
+                EventKind::RunStarted => {
+                    apply_run_started_event(state, &event.payload);
+                }
+                EventKind::ChangesetCreated => {
+                    apply_changeset_event(state);
+
+                    if let Some(run_id) = &event.run_id {
+                        let candidate = project_candidate(
+                            &task_id,
+                            run_id,
+                            &event.payload,
+                            state,
+                            event.global_seq,
+                        );
+                        candidates_by_task
+                            .entry(task_id.clone())
+                            .or_default()
+                            .push(candidate);
+                    }
+                }
+                EventKind::VerdictRecorded => {
+                    apply_verdict_event(state, &event.payload);
+                }
+                EventKind::RunnerOutput => {
+                    if let (Some(run_id), Some(output_chunk)) =
+                        (&event.run_id, project_output_chunk(&event))
+                    {
+                        output_by_run
+                            .entry(run_id.clone())
+                            .or_default()
+                            .push(output_chunk);
+                    }
+                }
+                EventKind::Unknown(_) => {}
+            }
+        }
+
+        let mut tasks = task_states
+            .into_iter()
+            .map(|(task_id, state)| TaskResponse {
+                task: Task {
+                    task_id: task_id.clone(),
+                    title: state.title.unwrap_or_else(|| format!("Task {task_id}")),
+                    owner: state.owner,
+                },
+                status: state.status,
+                status_detail: state.status_detail,
+            })
+            .collect::<Vec<_>>();
+
+        tasks.sort_by(|left, right| left.task.task_id.cmp(&right.task.task_id));
+
+        for output in output_by_run.values_mut() {
+            output.sort_by_key(|chunk| chunk.chunk_index);
+        }
 
         Self {
-            tasks: vec![task],
+            tasks,
             task_timeline,
             run_timeline,
             candidates_by_task,
@@ -150,6 +225,209 @@ impl TraceApi {
     }
 }
 
+fn event_kind_name(kind: &EventKind) -> String {
+    match kind {
+        EventKind::TaskClaimed => "task.claimed".to_string(),
+        EventKind::TaskRenewed => "task.renewed".to_string(),
+        EventKind::TaskReleased => "task.released".to_string(),
+        EventKind::VerdictRecorded => "verdict.recorded".to_string(),
+        EventKind::RunStarted => "run.started".to_string(),
+        EventKind::RunnerOutput => "runner.output".to_string(),
+        EventKind::ChangesetCreated => "changeset.created".to_string(),
+        EventKind::Unknown(value) => value.clone(),
+    }
+}
+
+fn hydrate_task_metadata(state: &mut TaskProjectionState, payload: &Value, task_id: &str) {
+    if state.title.is_none() {
+        state.title = payload_string(payload, &["title", "task_title"])
+            .or_else(|| Some(format!("Task {task_id}")));
+    }
+
+    if state.owner.is_none() {
+        state.owner = payload_string(payload, &["owner", "task_owner"]);
+    }
+}
+
+fn apply_claim_event(state: &mut TaskProjectionState, payload: &Value) {
+    let lease_epoch = payload_u64(payload, &["lease_epoch", "epoch"]).unwrap_or({
+        if state.current_epoch == 0 {
+            1
+        } else {
+            state.current_epoch
+        }
+    });
+    state.current_epoch = state.current_epoch.max(lease_epoch);
+
+    state.status = TaskStatus::Claimed;
+    state.status_detail = Some(StatusDetail {
+        lease_epoch: Some(state.current_epoch),
+        holder: payload_string(payload, &["holder", "worker_id", "claimed_by"]),
+        reason: payload_string(payload, &["reason"]),
+    });
+}
+
+fn apply_release_event(state: &mut TaskProjectionState, payload: &Value) {
+    state.status = TaskStatus::Unclaimed;
+    state.status_detail = Some(StatusDetail {
+        lease_epoch: (state.current_epoch > 0).then_some(state.current_epoch),
+        holder: None,
+        reason: payload_string(payload, &["reason"]),
+    });
+}
+
+fn apply_run_started_event(state: &mut TaskProjectionState, payload: &Value) {
+    state.status = TaskStatus::Running;
+
+    let existing = state.status_detail.clone().unwrap_or(StatusDetail {
+        lease_epoch: (state.current_epoch > 0).then_some(state.current_epoch),
+        holder: None,
+        reason: None,
+    });
+
+    let lease_epoch = payload_u64(payload, &["lease_epoch", "epoch"])
+        .or(existing.lease_epoch)
+        .or((state.current_epoch > 0).then_some(state.current_epoch));
+
+    if let Some(epoch) = lease_epoch {
+        state.current_epoch = state.current_epoch.max(epoch);
+    }
+
+    state.status_detail = Some(StatusDetail {
+        lease_epoch,
+        holder: payload_string(payload, &["holder", "worker_id"]).or(existing.holder),
+        reason: existing.reason,
+    });
+}
+
+fn apply_changeset_event(state: &mut TaskProjectionState) {
+    state.status = TaskStatus::Evaluating;
+}
+
+fn apply_verdict_event(state: &mut TaskProjectionState, payload: &Value) {
+    state.status = TaskStatus::Reviewed;
+
+    let existing = state.status_detail.clone().unwrap_or(StatusDetail {
+        lease_epoch: (state.current_epoch > 0).then_some(state.current_epoch),
+        holder: None,
+        reason: None,
+    });
+
+    state.status_detail = Some(StatusDetail {
+        lease_epoch: existing.lease_epoch,
+        holder: existing.holder,
+        reason: payload_string(payload, &["reason", "verdict"]).or(existing.reason),
+    });
+}
+
+fn project_candidate(
+    task_id: &str,
+    run_id: &str,
+    payload: &Value,
+    state: &TaskProjectionState,
+    global_seq: u64,
+) -> CandidateSummary {
+    let lease_epoch =
+        payload_u64(payload, &["lease_epoch", "epoch"]).unwrap_or(state.current_epoch);
+    let current_epoch = state.current_epoch.max(lease_epoch);
+
+    let candidate_id = payload_string(payload, &["candidate_id", "changeset_id", "id"])
+        .unwrap_or_else(|| format!("CAND-{global_seq}"));
+
+    let mut candidate = classify_candidate(
+        candidate_id,
+        task_id.to_string(),
+        run_id.to_string(),
+        lease_epoch,
+        current_epoch,
+    );
+
+    if payload_bool(payload, &["stale", "disqualified", "is_stale"]).unwrap_or(false) {
+        candidate.eligible = false;
+        candidate.disqualified_reason = Some(DISQUALIFIED_REASON_STALE_EPOCH.to_string());
+    }
+
+    candidate
+}
+
+fn project_output_chunk(event: &TraceEvent) -> Option<RunOutputChunk> {
+    let parsed = validate_runner_output_payload(&event.payload).ok()?;
+
+    Some(RunOutputChunk {
+        stream: match parsed.stream {
+            EventOutputStream::Stdout => "stdout".to_string(),
+            EventOutputStream::Stderr => "stderr".to_string(),
+        },
+        encoding: match parsed.encoding {
+            EventOutputEncoding::Utf8 => OutputEncoding::Utf8,
+            EventOutputEncoding::Base64 => OutputEncoding::Base64,
+        },
+        chunk: parsed.chunk,
+        chunk_index: parsed.chunk_index,
+        final_chunk: parsed.final_chunk,
+    })
+}
+
+fn payload_value<'a>(payload: &'a Value, key: &str) -> Option<&'a Value> {
+    payload
+        .get(key)
+        .or_else(|| payload.get("task").and_then(|task| task.get(key)))
+}
+
+fn payload_string(payload: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = payload_value(payload, key) {
+            if let Some(text) = value.as_str() {
+                return Some(text.to_string());
+            }
+
+            if value.is_number() || value.is_boolean() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn payload_u64(payload: &Value, keys: &[&str]) -> Option<u64> {
+    for key in keys {
+        if let Some(value) = payload_value(payload, key) {
+            if let Some(number) = value.as_u64() {
+                return Some(number);
+            }
+
+            if let Some(text) = value.as_str() {
+                if let Ok(number) = text.parse::<u64>() {
+                    return Some(number);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn payload_bool(payload: &Value, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        if let Some(value) = payload_value(payload, key) {
+            if let Some(boolean) = value.as_bool() {
+                return Some(boolean);
+            }
+
+            if let Some(text) = value.as_str() {
+                match text {
+                    "true" | "TRUE" | "1" => return Some(true),
+                    "false" | "FALSE" | "0" => return Some(false),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerRuntime {
     pub api: TraceApi,
@@ -175,10 +453,9 @@ pub fn bootstrap_runtime(root: impl AsRef<Path>) -> Result<ServerRuntime, Server
         tip_global_seq,
     });
 
-    Ok(ServerRuntime {
-        api: TraceApi::sample(),
-        guard,
-    })
+    let api = TraceApi::from_store(&event_store)?;
+
+    Ok(ServerRuntime { api, guard })
 }
 
 #[derive(Clone)]
@@ -273,6 +550,7 @@ async fn get_run_output_handler(
 mod tests {
     use std::env;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
@@ -285,11 +563,92 @@ mod tests {
     use super::{app_router, bootstrap_runtime, TraceApi, PHASE0_ENDPOINTS};
 
     fn unique_temp_root() -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock should be monotonic for test")
             .as_nanos();
-        env::temp_dir().join(format!("trace-server-test-{nanos}"))
+        let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!("trace-server-test-{nanos}-{serial}"))
+    }
+
+    fn append_event(
+        store: &EventStore,
+        task_id: &str,
+        run_id: Option<&str>,
+        kind: EventKind,
+        payload: Value,
+    ) {
+        static EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let tick = EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let sec = 20 + (tick % 30);
+        let ts = format!("2026-02-28T05:20:{sec:02}.000Z");
+
+        let event = NewTraceEvent {
+            global_seq: None,
+            ts,
+            task_id: task_id.to_string(),
+            run_id: run_id.map(ToString::to_string),
+            kind,
+            payload,
+        };
+
+        store
+            .append_event(event)
+            .expect("seed event append should succeed");
+    }
+
+    fn seed_event_log(root: &std::path::Path) -> EventStore {
+        let store = EventStore::new(root);
+
+        append_event(
+            &store,
+            "TASK-42",
+            None,
+            EventKind::TaskClaimed,
+            json!({
+                "epoch": 7,
+                "worker_id": "agent-3",
+                "title": "Improve lease replay",
+                "owner": "platform"
+            }),
+        );
+        append_event(
+            &store,
+            "TASK-42",
+            Some("RUN-13"),
+            EventKind::RunStarted,
+            json!({}),
+        );
+        append_event(
+            &store,
+            "TASK-42",
+            Some("RUN-13"),
+            EventKind::ChangesetCreated,
+            json!({"candidate_id": "C-100", "lease_epoch": 7}),
+        );
+        append_event(
+            &store,
+            "TASK-42",
+            Some("RUN-12"),
+            EventKind::ChangesetCreated,
+            json!({"candidate_id": "C-099", "lease_epoch": 6}),
+        );
+        append_event(
+            &store,
+            "TASK-42",
+            Some("RUN-13"),
+            EventKind::RunnerOutput,
+            json!({
+                "stream": "stdout",
+                "encoding": "utf8",
+                "chunk": "hello from RUN-13",
+                "chunk_index": 0,
+                "final": true
+            }),
+        );
+
+        store
     }
 
     #[test]
@@ -304,18 +663,44 @@ mod tests {
 
     #[test]
     fn test_candidates_exclude_disqualified_by_default() {
-        let api = TraceApi::sample();
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+
+        let api = TraceApi::from_store(&store).expect("projection should build");
 
         let default_candidates = api.get_task_candidates("TASK-42", false);
         let all_candidates = api.get_task_candidates("TASK-42", true);
 
         assert_eq!(default_candidates.len(), 1);
         assert_eq!(all_candidates.len(), 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn test_projection_surfaces_output_and_timelines() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+
+        let api = TraceApi::from_store(&store).expect("projection should build");
+
+        let task = api.get_task("TASK-42").expect("task should exist");
+        assert_eq!(task.task.title, "Improve lease replay");
+        assert_eq!(task.status, trace_api_types::TaskStatus::Evaluating);
+
+        assert_eq!(api.get_task_timeline("TASK-42").len(), 5);
+        assert_eq!(api.get_run_timeline("RUN-13").len(), 3);
+        assert_eq!(api.get_run_output("RUN-13").len(), 1);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[tokio::test]
     async fn test_tasks_route_returns_nested_shape() {
-        let app = app_router(TraceApi::sample());
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let api = TraceApi::from_store(&store).expect("projection should build");
+        let app = app_router(api);
 
         let response = app
             .oneshot(
@@ -337,11 +722,16 @@ mod tests {
 
         assert!(parsed[0].get("task").is_some());
         assert!(parsed[0].get("task_id").is_none());
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[tokio::test]
     async fn test_candidates_route_honors_query_toggle() {
-        let app = app_router(TraceApi::sample());
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let api = TraceApi::from_store(&store).expect("projection should build");
+        let app = app_router(api);
 
         let default_response = app
             .clone()
@@ -380,25 +770,14 @@ mod tests {
 
         assert_eq!(default_candidates.len(), 1);
         assert_eq!(all_candidates.len(), 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
     fn test_startup_replay_reaches_tip_before_guard() {
         let root = unique_temp_root();
-        let store = EventStore::new(&root);
-
-        let event = NewTraceEvent {
-            global_seq: None,
-            ts: "2026-02-28T05:21:01.000Z".to_string(),
-            task_id: "TASK-42".to_string(),
-            run_id: Some("RUN-13".to_string()),
-            kind: EventKind::RunStarted,
-            payload: json!({}),
-        };
-
-        store
-            .append_event(event)
-            .expect("event should be appended before startup");
+        let store = seed_event_log(&root);
 
         let runtime = bootstrap_runtime(&root).expect("runtime bootstrap should succeed");
         runtime

@@ -3,7 +3,14 @@ use std::env;
 use trace_server::TraceApi;
 
 fn main() {
-    let api = TraceApi::sample();
+    let root = env::var("TRACE_ROOT").unwrap_or_else(|_| ".".to_string());
+    let api = match TraceApi::from_root(&root) {
+        Ok(api) => api,
+        Err(error) => {
+            eprintln!("failed to load TRACE events from root '{root}': {error}");
+            std::process::exit(1);
+        }
+    };
 
     let mut args = env::args();
     let _binary = args.next();
