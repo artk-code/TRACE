@@ -37,6 +37,8 @@ Commands:
       Split target window/pane and start lane.
       default target: <session>:lanes
       mode: interactive | runner (default: interactive)
+  wait-lane <lane_name> [timeout_sec]
+      Wait for a lane pane to finish (runner mode).
   stop
       Kill tmux session.
   help
@@ -48,6 +50,7 @@ Examples:
   $0 add-lane codex4 high
   $0 add-lane codex4 high runner
   $0 add-pane codex5 flash trace-smoke:lanes runner
+  $0 wait-lane codex5 180
 EOF
 }
 
@@ -85,15 +88,42 @@ build_lane_cmd() {
   local lane="$2"
   local profile="$3"
   local mode="${4:-interactive}"
-  printf "%q %q %q %q %q %q %q %q" \
-    "$LANE_BOOTSTRAP" \
-    "$lane" \
-    "$profile" \
-    "$REPO_ROOT" \
-    "$TRACE_ROOT_VALUE" \
-    "$TRACE_SERVER_ADDR_VALUE" \
-    "$role" \
-    "$mode"
+  if [[ "$mode" == "runner" ]]; then
+    printf "%q %q %q %q %q %q %q %q %q %q" \
+      "env" \
+      "TRACE_RUNNER_EXIT_AFTER_RUN=1" \
+      "$LANE_BOOTSTRAP" \
+      "$lane" \
+      "$profile" \
+      "$REPO_ROOT" \
+      "$TRACE_ROOT_VALUE" \
+      "$TRACE_SERVER_ADDR_VALUE" \
+      "$role" \
+      "$mode"
+  else
+    printf "%q %q %q %q %q %q %q %q" \
+      "$LANE_BOOTSTRAP" \
+      "$lane" \
+      "$profile" \
+      "$REPO_ROOT" \
+      "$TRACE_ROOT_VALUE" \
+      "$TRACE_SERVER_ADDR_VALUE" \
+      "$role" \
+      "$mode"
+  fi
+}
+
+configure_lane_pane() {
+  local pane_id="$1"
+  local lane_name="$2"
+  local mode="$3"
+
+  tmux select-pane -t "$pane_id" -T "lane-${lane_name}"
+  tmux set-option -pt "$pane_id" "@trace_lane_name" "$lane_name" >/dev/null
+  tmux set-option -pt "$pane_id" "@trace_lane_mode" "$mode" >/dev/null
+  if [[ "$mode" == "runner" ]]; then
+    tmux set-window-option -t "$pane_id" remain-on-exit on >/dev/null
+  fi
 }
 
 parse_global_options() {
@@ -230,7 +260,7 @@ status_session() {
   tmux list-windows -t "$SESSION"
   echo
   echo "panes:"
-  tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "#{session_name}:#{window_name}.#{pane_index} pid=#{pane_pid} cmd=#{pane_current_command}"
+  tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "#{session_name}:#{window_name}.#{pane_index} title=#{pane_title} dead=#{pane_dead} dead_status=#{pane_dead_status} pid=#{pane_pid} cmd=#{pane_current_command}"
   echo
   echo "session config:"
   echo "TRACE_ROOT=$(session_env_value TRACE_ROOT || echo "<unset>")"
@@ -257,7 +287,9 @@ add_lane() {
   fi
   validate_lane_mode "$mode"
 
-  tmux new-window -t "${SESSION}:" -n "lane-${lane_name}" "$(build_lane_cmd lane "$lane_name" "$profile" "$mode")"
+  local pane_id
+  pane_id="$(tmux new-window -P -F "#{pane_id}" -t "${SESSION}:" -n "lane-${lane_name}" "$(build_lane_cmd lane "$lane_name" "$profile" "$mode")")"
+  configure_lane_pane "$pane_id" "$lane_name" "$mode"
   echo "added lane window: lane-${lane_name} (profile=$profile mode=$mode)"
 }
 
@@ -294,9 +326,60 @@ add_pane() {
   fi
   validate_lane_mode "$mode"
 
-  tmux split-window -t "$target" -v "$(build_lane_cmd lane "$lane_name" "$profile" "$mode")"
+  local pane_id
+  pane_id="$(tmux split-window -P -F "#{pane_id}" -t "$target" -v "$(build_lane_cmd lane "$lane_name" "$profile" "$mode")")"
+  configure_lane_pane "$pane_id" "$lane_name" "$mode"
   tmux select-layout -t "$target" tiled || true
   echo "added lane pane: $lane_name (profile=$profile mode=$mode) on target $target"
+}
+
+wait_lane() {
+  require_tmux
+  if ! session_exists; then
+    echo "session '$SESSION' does not exist." >&2
+    exit 1
+  fi
+
+  local lane_name="${1:-}"
+  local timeout_sec="${2:-180}"
+  local lane_title="lane-${lane_name}"
+  local deadline
+
+  if [[ -z "$lane_name" ]]; then
+    echo "usage: $0 [global opts] wait-lane <lane_name> [timeout_sec]" >&2
+    exit 2
+  fi
+  if ! [[ "$timeout_sec" =~ ^[0-9]+$ ]] || (( timeout_sec < 1 )); then
+    echo "timeout_sec must be a positive integer" >&2
+    exit 2
+  fi
+
+  deadline=$((SECONDS + timeout_sec))
+  while (( SECONDS <= deadline )); do
+    local lane_row=""
+    lane_row="$(
+      tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "#{pane_id}\t#{pane_title}\t#{pane_dead}\t#{pane_dead_status}" \
+        | awk -F '\t' -v target_title="$lane_title" '$2==target_title {print; exit}'
+    )"
+
+    if [[ -n "$lane_row" ]]; then
+      local pane_id pane_title pane_dead pane_dead_status
+      IFS=$'\t' read -r pane_id pane_title pane_dead pane_dead_status <<<"$lane_row"
+      if [[ "$pane_dead" == "1" ]]; then
+        if [[ "$pane_dead_status" == "0" ]]; then
+          echo "lane '$lane_name' completed successfully"
+          return 0
+        fi
+        echo "lane '$lane_name' failed with exit status $pane_dead_status" >&2
+        return 1
+      fi
+    fi
+
+    sleep 1
+  done
+
+  echo "timed out waiting for lane '$lane_name' after ${timeout_sec}s" >&2
+  return 1
 }
 
 stop_session() {
@@ -330,6 +413,9 @@ case "$command" in
     ;;
   add-pane)
     add_pane "$@"
+    ;;
+  wait-lane)
+    wait_lane "$@"
     ;;
   stop)
     stop_session

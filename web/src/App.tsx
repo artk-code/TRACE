@@ -19,6 +19,18 @@ function optionalValue(value: string): string | undefined {
   return trimmed === "" ? undefined : trimmed;
 }
 
+function optionalPositiveInt(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return undefined;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return parsed;
+}
+
 export default function App() {
   const [includeDisqualified, setIncludeDisqualified] = useState(false);
   const [session, setSession] = useState("trace-smoke");
@@ -27,9 +39,13 @@ export default function App() {
   const [laneName, setLaneName] = useState("codex4");
   const [laneProfile, setLaneProfile] = useState("high");
   const [laneMode, setLaneMode] = useState("interactive");
+  const [laneWaitForRunner, setLaneWaitForRunner] = useState(true);
+  const [laneRunnerTimeoutSec, setLaneRunnerTimeoutSec] = useState("180");
   const [paneLaneName, setPaneLaneName] = useState("codex5");
   const [paneProfile, setPaneProfile] = useState("flash");
   const [paneMode, setPaneMode] = useState("interactive");
+  const [paneWaitForRunner, setPaneWaitForRunner] = useState(true);
+  const [paneRunnerTimeoutSec, setPaneRunnerTimeoutSec] = useState("180");
   const [paneTarget, setPaneTarget] = useState("");
   const [orchestrationBusy, setOrchestrationBusy] = useState<string | null>(null);
   const [orchestrationError, setOrchestrationError] = useState<string | null>(null);
@@ -127,6 +143,23 @@ export default function App() {
             </select>
           </label>
           <label>
+            Add-Lane Wait:
+            <input
+              type="checkbox"
+              checked={laneWaitForRunner}
+              disabled={laneMode !== "runner"}
+              onChange={(event) => setLaneWaitForRunner(event.target.checked)}
+            />
+          </label>
+          <label>
+            Add-Lane Timeout (s):
+            <input
+              value={laneRunnerTimeoutSec}
+              disabled={laneMode !== "runner"}
+              onChange={(event) => setLaneRunnerTimeoutSec(event.target.value)}
+            />
+          </label>
+          <label>
             Add-Pane Name:
             <input value={paneLaneName} onChange={(event) => setPaneLaneName(event.target.value)} />
           </label>
@@ -140,6 +173,23 @@ export default function App() {
               <option value="interactive">interactive</option>
               <option value="runner">runner</option>
             </select>
+          </label>
+          <label>
+            Add-Pane Wait:
+            <input
+              type="checkbox"
+              checked={paneWaitForRunner}
+              disabled={paneMode !== "runner"}
+              onChange={(event) => setPaneWaitForRunner(event.target.checked)}
+            />
+          </label>
+          <label>
+            Add-Pane Timeout (s):
+            <input
+              value={paneRunnerTimeoutSec}
+              disabled={paneMode !== "runner"}
+              onChange={(event) => setPaneRunnerTimeoutSec(event.target.value)}
+            />
           </label>
           <label>
             Add-Pane Target:
@@ -185,6 +235,9 @@ export default function App() {
                   lane_name: laneName.trim(),
                   profile: optionalValue(laneProfile),
                   mode: laneMode === "interactive" ? undefined : laneMode,
+                  wait_for_runner: laneMode === "runner" ? laneWaitForRunner : undefined,
+                  runner_timeout_sec:
+                    laneMode === "runner" ? optionalPositiveInt(laneRunnerTimeoutSec) : undefined,
                 }),
               )
             }
@@ -201,6 +254,9 @@ export default function App() {
                   profile: optionalValue(paneProfile),
                   target: optionalValue(paneTarget) ?? defaultPaneTarget,
                   mode: paneMode === "interactive" ? undefined : paneMode,
+                  wait_for_runner: paneMode === "runner" ? paneWaitForRunner : undefined,
+                  runner_timeout_sec:
+                    paneMode === "runner" ? optionalPositiveInt(paneRunnerTimeoutSec) : undefined,
                 }),
               )
             }

@@ -80,6 +80,9 @@ Runner mode env knobs:
   TRACE_RUNNER_TASK_PREFIX       task prefix (default: TASK-SMOKE)
   TRACE_RUNNER_NONCE             run nonce (default: unix timestamp)
   TRACE_RUNNER_VERDICT           verdict payload value (default: pass)
+  TRACE_RUNNER_RETRY_ATTEMPTS    request retry attempts (default: 20)
+  TRACE_RUNNER_RETRY_DELAY_SEC   retry delay in seconds (default: 1)
+  TRACE_RUNNER_READY_TIMEOUT_SEC api readiness wait timeout (default: 30)
   TRACE_RUNNER_EXIT_AFTER_RUN    set to 1 to exit pane process after run
 EOF_HINTS
 }
@@ -103,6 +106,38 @@ iso_now() {
 post_json() {
   local url="$1"
   local payload="$2"
+  local attempts="${TRACE_RUNNER_RETRY_ATTEMPTS:-20}"
+  local delay_sec="${TRACE_RUNNER_RETRY_DELAY_SEC:-1}"
+  local attempt=1
+
+  if ! [[ "$attempts" =~ ^[0-9]+$ ]] || (( attempts < 1 )); then
+    echo "TRACE_RUNNER_RETRY_ATTEMPTS must be a positive integer" >&2
+    exit 2
+  fi
+  if ! [[ "$delay_sec" =~ ^[0-9]+$ ]]; then
+    echo "TRACE_RUNNER_RETRY_DELAY_SEC must be a non-negative integer" >&2
+    exit 2
+  fi
+
+  while true; do
+    if body="$(post_json_once "$url" "$payload")"; then
+      printf '%s\n' "$body"
+      return 0
+    fi
+
+    if (( attempt >= attempts )); then
+      echo "request failed after $attempt attempts: POST $url" >&2
+      return 1
+    fi
+
+    sleep "$delay_sec"
+    attempt=$((attempt + 1))
+  done
+}
+
+post_json_once() {
+  local url="$1"
+  local payload="$2"
   local response_file
   local http_code
   local body
@@ -119,6 +154,28 @@ post_json() {
   fi
 
   printf '%s\n' "$body"
+}
+
+wait_for_api_ready() {
+  local timeout_sec="${TRACE_RUNNER_READY_TIMEOUT_SEC:-30}"
+  local sleep_sec=1
+  local deadline
+
+  if ! [[ "$timeout_sec" =~ ^[0-9]+$ ]] || (( timeout_sec < 1 )); then
+    echo "TRACE_RUNNER_READY_TIMEOUT_SEC must be a positive integer" >&2
+    exit 2
+  fi
+
+  deadline=$((SECONDS + timeout_sec))
+  while (( SECONDS < deadline )); do
+    if curl -sS --fail "$TRACE_API_BASE_URL/tasks" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$sleep_sec"
+  done
+
+  echo "TRACE API did not become ready within ${timeout_sec}s: $TRACE_API_BASE_URL" >&2
+  return 1
 }
 
 run_scripted_lane() {
@@ -138,6 +195,8 @@ run_scripted_lane() {
   echo "nonce=$nonce"
   echo "verdict=$verdict"
   echo
+
+  wait_for_api_ready
 
   local index
   for ((index = 1; index <= task_count; index += 1)); do

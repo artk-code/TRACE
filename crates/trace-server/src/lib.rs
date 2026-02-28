@@ -596,6 +596,8 @@ struct TmuxAddLaneRequest {
     lane_name: String,
     profile: Option<String>,
     mode: Option<String>,
+    wait_for_runner: Option<bool>,
+    runner_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -606,6 +608,8 @@ struct TmuxAddPaneRequest {
     profile: Option<String>,
     target: Option<String>,
     mode: Option<String>,
+    wait_for_runner: Option<bool>,
+    runner_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -858,6 +862,16 @@ fn validate_tmux_lane_mode(value: &str) -> Result<(), (StatusCode, Json<ApiError
     }
 }
 
+fn validate_runner_timeout(timeout_sec: u64) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if (1..=3600).contains(&timeout_sec) {
+        Ok(())
+    } else {
+        Err(bad_request_error(
+            "runner_timeout_sec must be between 1 and 3600",
+        ))
+    }
+}
+
 fn validate_trace_root(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
     if value.is_empty() {
         return Err(bad_request_error("trace_root cannot be empty"));
@@ -875,10 +889,10 @@ fn validate_trace_server_addr(value: &str) -> Result<(), (StatusCode, Json<ApiEr
         .map_err(|_| bad_request_error("addr must be a valid socket address like 127.0.0.1:18080"))
 }
 
-async fn execute_tmux_script(
+async fn execute_tmux_script_result(
     state: &ApiState,
     args: Vec<String>,
-) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
     let script_path = state.tmux_script_path.clone();
     let command = format!("{} {}", script_path.display(), args.join(" "));
     let command_args = args.clone();
@@ -914,12 +928,19 @@ async fn execute_tmux_script(
         ));
     }
 
-    Ok(Json(TmuxCommandResponse {
+    Ok(TmuxCommandResponse {
         command,
         exit_code,
         stdout,
         stderr,
-    }))
+    })
+}
+
+async fn execute_tmux_script(
+    state: &ApiState,
+    args: Vec<String>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_tmux_script_result(state, args).await.map(Json)
 }
 
 async fn post_tmux_start_handler(
@@ -967,26 +988,71 @@ async fn post_tmux_add_lane_handler(
         lane_name,
         profile,
         mode,
+        wait_for_runner,
+        runner_timeout_sec,
     } = request;
 
     let session = validate_tmux_session(session)?;
     validate_tmux_token("lane_name", &lane_name)?;
     let profile = profile.unwrap_or_else(|| lane_name.clone());
     validate_tmux_token("profile", &profile)?;
+    let mode = mode.unwrap_or_else(|| "interactive".to_string());
+    validate_tmux_lane_mode(&mode)?;
+    let should_wait = wait_for_runner.unwrap_or(false);
+    if should_wait && mode != "runner" {
+        return Err(bad_request_error(
+            "wait_for_runner=true requires mode=runner",
+        ));
+    }
+    let timeout_sec = runner_timeout_sec.unwrap_or(180);
+    if should_wait {
+        validate_runner_timeout(timeout_sec)?;
+    }
 
     let mut args = vec![
         "--session".to_string(),
-        session,
+        session.clone(),
         "add-lane".to_string(),
-        lane_name,
+        lane_name.clone(),
         profile,
     ];
-    if let Some(mode) = mode {
-        validate_tmux_lane_mode(&mode)?;
-        args.push(mode);
+    args.push(mode.clone());
+
+    let create_response = execute_tmux_script_result(&state, args).await?;
+    if !should_wait {
+        return Ok(Json(create_response));
     }
 
-    execute_tmux_script(&state, args).await
+    let wait_response = execute_tmux_script_result(
+        &state,
+        vec![
+            "--session".to_string(),
+            session,
+            "wait-lane".to_string(),
+            lane_name,
+            timeout_sec.to_string(),
+        ],
+    )
+    .await?;
+
+    Ok(Json(TmuxCommandResponse {
+        command: format!("{} && {}", create_response.command, wait_response.command),
+        exit_code: wait_response.exit_code,
+        stdout: if create_response.stdout.is_empty() {
+            wait_response.stdout
+        } else if wait_response.stdout.is_empty() {
+            create_response.stdout
+        } else {
+            format!("{}\n{}", create_response.stdout, wait_response.stdout)
+        },
+        stderr: if create_response.stderr.is_empty() {
+            wait_response.stderr
+        } else if wait_response.stderr.is_empty() {
+            create_response.stderr
+        } else {
+            format!("{}\n{}", create_response.stderr, wait_response.stderr)
+        },
+    }))
 }
 
 async fn post_tmux_add_pane_handler(
@@ -999,30 +1065,75 @@ async fn post_tmux_add_pane_handler(
         profile,
         target,
         mode,
+        wait_for_runner,
+        runner_timeout_sec,
     } = request;
 
     let session = validate_tmux_session(session)?;
     validate_tmux_token("lane_name", &lane_name)?;
     let profile = profile.unwrap_or_else(|| lane_name.clone());
     validate_tmux_token("profile", &profile)?;
+    let mode = mode.unwrap_or_else(|| "interactive".to_string());
+    validate_tmux_lane_mode(&mode)?;
+    let should_wait = wait_for_runner.unwrap_or(false);
+    if should_wait && mode != "runner" {
+        return Err(bad_request_error(
+            "wait_for_runner=true requires mode=runner",
+        ));
+    }
+    let timeout_sec = runner_timeout_sec.unwrap_or(180);
+    if should_wait {
+        validate_runner_timeout(timeout_sec)?;
+    }
 
     let mut args = vec![
         "--session".to_string(),
-        session,
+        session.clone(),
         "add-pane".to_string(),
-        lane_name,
+        lane_name.clone(),
         profile,
     ];
     if let Some(target) = target {
         validate_tmux_target(&target)?;
         args.push(target);
     }
-    if let Some(mode) = mode {
-        validate_tmux_lane_mode(&mode)?;
-        args.push(mode);
+    args.push(mode);
+
+    let create_response = execute_tmux_script_result(&state, args).await?;
+    if !should_wait {
+        return Ok(Json(create_response));
     }
 
-    execute_tmux_script(&state, args).await
+    let wait_response = execute_tmux_script_result(
+        &state,
+        vec![
+            "--session".to_string(),
+            session,
+            "wait-lane".to_string(),
+            lane_name,
+            timeout_sec.to_string(),
+        ],
+    )
+    .await?;
+
+    Ok(Json(TmuxCommandResponse {
+        command: format!("{} && {}", create_response.command, wait_response.command),
+        exit_code: wait_response.exit_code,
+        stdout: if create_response.stdout.is_empty() {
+            wait_response.stdout
+        } else if wait_response.stdout.is_empty() {
+            create_response.stdout
+        } else {
+            format!("{}\n{}", create_response.stdout, wait_response.stdout)
+        },
+        stderr: if create_response.stderr.is_empty() {
+            wait_response.stderr
+        } else if wait_response.stderr.is_empty() {
+            create_response.stderr
+        } else {
+            format!("{}\n{}", create_response.stderr, wait_response.stderr)
+        },
+    }))
 }
 
 async fn post_tmux_stop_handler(
@@ -2282,6 +2393,93 @@ mod tests {
         let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
         assert!(logged_args.contains("--session trace-web-test"));
         assert!(logged_args.contains("add-lane codex4 high runner"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_add_lane_wait_for_runner_invokes_wait_lane() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let script_path = root.join("tmux-ok.sh");
+        write_executable_script(
+            &script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"ok\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/add-lane")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "lane_name": "codex6",
+                            "profile": "high",
+                            "mode": "runner",
+                            "wait_for_runner": true,
+                            "runner_timeout_sec": 9
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("add-lane codex6 high runner"));
+        assert!(logged_args.contains("wait-lane codex6 9"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_add_pane_wait_for_runner_requires_runner_mode() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let script_path = root.join("tmux-unused.sh");
+        write_executable_script(&script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/add-pane")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "lane_name": "codex5",
+                            "profile": "flash",
+                            "mode": "interactive",
+                            "wait_for_runner": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wait_for_runner=true requires mode=runner"));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

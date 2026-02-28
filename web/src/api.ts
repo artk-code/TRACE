@@ -31,6 +31,8 @@ export type TmuxAddLaneRequest = {
   lane_name: string;
   profile?: string;
   mode?: string;
+  wait_for_runner?: boolean;
+  runner_timeout_sec?: number;
 };
 
 export type TmuxAddPaneRequest = {
@@ -39,6 +41,8 @@ export type TmuxAddPaneRequest = {
   profile?: string;
   target?: string;
   mode?: string;
+  wait_for_runner?: boolean;
+  runner_timeout_sec?: number;
 };
 
 async function requestJson(path: string, init?: RequestInit): Promise<unknown> {
