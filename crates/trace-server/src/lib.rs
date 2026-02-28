@@ -1,26 +1,31 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 use trace_api_types::{
     CandidateSummary, OutputEncoding, RunOutputChunk, StatusDetail, Task, TaskResponse, TaskStatus,
     TimelineEvent,
 };
 use trace_events::{
-    validate_runner_output_payload, EventKind, OutputEncoding as EventOutputEncoding,
-    OutputStream as EventOutputStream, TraceEvent,
+    validate_runner_output_payload, EventKind, NewTraceEvent,
+    OutputEncoding as EventOutputEncoding, OutputStream as EventOutputStream, TraceEvent,
 };
 use trace_lease::{
-    GuardError, LeaseStoreError, ReplayCheckpointStore, ReplayState, WorkspaceGuard,
+    GuardError, LeaseIndexStore, LeaseStoreError, ReplayCheckpointStore, ReplayState,
+    WorkspaceGuard,
 };
 use trace_normalizer::{classify_candidate, filter_candidates, DISQUALIFIED_REASON_STALE_EPOCH};
 use trace_store::EventStore;
@@ -431,6 +436,9 @@ fn payload_bool(payload: &Value, keys: &[&str]) -> Option<bool> {
 #[derive(Debug, Clone)]
 pub struct ServerRuntime {
     pub api: TraceApi,
+    event_store: EventStore,
+    lease_store: LeaseIndexStore,
+    replay_store: ReplayCheckpointStore,
     guard: WorkspaceGuard,
 }
 
@@ -442,9 +450,13 @@ impl ServerRuntime {
 
 pub fn bootstrap_runtime(root: impl AsRef<Path>) -> Result<ServerRuntime, ServerError> {
     let event_store = EventStore::new(root.as_ref());
+    let lease_store = LeaseIndexStore::new(root.as_ref())?;
     let replay_store = ReplayCheckpointStore::new(root.as_ref())?;
 
-    let tip_global_seq = event_store.tip_global_seq()?;
+    let events = event_store.read_all_events()?;
+    lease_store.replay_events(&events)?;
+
+    let tip_global_seq = events.last().map(|event| event.global_seq).unwrap_or(0);
     replay_store.replay_to_tip(tip_global_seq)?;
     let checkpoint_global_seq = replay_store.checkpoint_global_seq()?;
 
@@ -453,14 +465,24 @@ pub fn bootstrap_runtime(root: impl AsRef<Path>) -> Result<ServerRuntime, Server
         tip_global_seq,
     });
 
-    let api = TraceApi::from_store(&event_store)?;
+    let api = TraceApi::from_events(events);
 
-    Ok(ServerRuntime { api, guard })
+    Ok(ServerRuntime {
+        api,
+        event_store,
+        lease_store,
+        replay_store,
+        guard,
+    })
 }
 
 #[derive(Clone)]
 struct ApiState {
-    api: Arc<TraceApi>,
+    api: Arc<RwLock<TraceApi>>,
+    event_store: EventStore,
+    lease_store: LeaseIndexStore,
+    replay_store: ReplayCheckpointStore,
+    writer_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,8 +490,148 @@ struct CandidateQuery {
     include_disqualified: Option<bool>,
 }
 
-pub fn app_router(api: TraceApi) -> Router {
-    let state = ApiState { api: Arc::new(api) };
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskClaimRequest {
+    worker_id: String,
+    expected_epoch: Option<u64>,
+    title: Option<String>,
+    owner: Option<String>,
+    reason: Option<String>,
+    ts: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskLeaseUpdateRequest {
+    worker_id: String,
+    lease_epoch: u64,
+    reason: Option<String>,
+    ts: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunStartRequest {
+    run_id: String,
+    worker_id: String,
+    lease_epoch: u64,
+    model: Option<String>,
+    provider: Option<String>,
+    profile: Option<String>,
+    temperature: Option<f64>,
+    prompt_id: Option<String>,
+    ts: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunOutputRequest {
+    worker_id: String,
+    lease_epoch: u64,
+    stream: EventOutputStream,
+    encoding: EventOutputEncoding,
+    chunk: String,
+    chunk_index: u64,
+    #[serde(rename = "final", default)]
+    final_chunk: bool,
+    ts: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateCreateRequest {
+    worker_id: String,
+    lease_epoch: u64,
+    candidate_id: Option<String>,
+    stale: Option<bool>,
+    reason: Option<String>,
+    ts: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct BenchmarkEvaluateRequest {
+    report_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkEvaluateResponse {
+    report_id: String,
+    json_report_path: String,
+    markdown_report_path: String,
+    summary: BenchmarkSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkSummary {
+    total_tasks: usize,
+    total_runs: usize,
+    total_events: usize,
+    models: Vec<BenchmarkModelSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkReport {
+    report_id: String,
+    generated_at: String,
+    total_events: usize,
+    total_tasks: usize,
+    total_runs: usize,
+    models: Vec<BenchmarkModelSummary>,
+    runs: Vec<BenchmarkRunSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkRunSummary {
+    run_id: String,
+    task_id: String,
+    model: Option<String>,
+    provider: Option<String>,
+    profile: Option<String>,
+    worker_id: Option<String>,
+    lease_epoch: Option<u64>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    duration_ms: Option<i64>,
+    candidate_total: usize,
+    candidate_eligible: usize,
+    candidate_disqualified: usize,
+    output_chunks: usize,
+    output_bytes: usize,
+    verdict: Option<String>,
+    passed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkModelSummary {
+    model_key: String,
+    model: Option<String>,
+    provider: Option<String>,
+    profile: Option<String>,
+    runs: usize,
+    pass_count: usize,
+    fail_count: usize,
+    candidate_total: usize,
+    candidate_eligible: usize,
+    candidate_disqualified: usize,
+    output_bytes: usize,
+    avg_duration_ms: Option<f64>,
+}
+
+pub fn app_router(
+    api: TraceApi,
+    event_store: EventStore,
+    lease_store: LeaseIndexStore,
+    replay_store: ReplayCheckpointStore,
+) -> Router {
+    let state = ApiState {
+        api: Arc::new(RwLock::new(api)),
+        event_store,
+        lease_store,
+        replay_store,
+        writer_lock: Arc::new(Mutex::new(())),
+    };
 
     Router::new()
         .route("/tasks", get(get_tasks_handler))
@@ -481,6 +643,26 @@ pub fn app_router(api: TraceApi) -> Router {
             get(get_task_candidates_handler),
         )
         .route("/runs/{run_id}/output", get(get_run_output_handler))
+        .route("/events", post(post_event_handler))
+        .route("/tasks/{task_id}/claim", post(post_task_claim_handler))
+        .route("/tasks/{task_id}/renew", post(post_task_renew_handler))
+        .route("/tasks/{task_id}/release", post(post_task_release_handler))
+        .route(
+            "/tasks/{task_id}/runs/start",
+            post(post_run_started_handler),
+        )
+        .route(
+            "/tasks/{task_id}/runs/{run_id}/output",
+            post(post_run_output_handler),
+        )
+        .route(
+            "/tasks/{task_id}/runs/{run_id}/candidates",
+            post(post_candidate_create_handler),
+        )
+        .route(
+            "/benchmarks/evaluate",
+            post(post_benchmark_evaluate_handler),
+        )
         .with_state(state)
 }
 
@@ -490,7 +672,13 @@ pub async fn serve(addr: SocketAddr, root: impl AsRef<Path>) -> Result<(), Serve
         .assert_lease_sensitive_ready()
         .map_err(ServerError::Guard)?;
 
-    let app = app_router(runtime.api).layer(TraceLayer::new_for_http());
+    let app = app_router(
+        runtime.api,
+        runtime.event_store,
+        runtime.lease_store,
+        runtime.replay_store,
+    )
+    .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
@@ -498,16 +686,16 @@ pub async fn serve(addr: SocketAddr, root: impl AsRef<Path>) -> Result<(), Serve
 }
 
 async fn get_tasks_handler(State(state): State<ApiState>) -> Json<Vec<TaskResponse>> {
-    Json(state.api.get_tasks())
+    let api = state.api.read().expect("api lock should be readable");
+    Json(api.get_tasks())
 }
 
 async fn get_task_handler(
     State(state): State<ApiState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Result<Json<TaskResponse>, StatusCode> {
-    state
-        .api
-        .get_task(&task_id)
+    let api = state.api.read().expect("api lock should be readable");
+    api.get_task(&task_id)
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -516,14 +704,16 @@ async fn get_task_timeline_handler(
     State(state): State<ApiState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Json<Vec<TimelineEvent>> {
-    Json(state.api.get_task_timeline(&task_id))
+    let api = state.api.read().expect("api lock should be readable");
+    Json(api.get_task_timeline(&task_id))
 }
 
 async fn get_run_timeline_handler(
     State(state): State<ApiState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> Json<Vec<TimelineEvent>> {
-    Json(state.api.get_run_timeline(&run_id))
+    let api = state.api.read().expect("api lock should be readable");
+    Json(api.get_run_timeline(&run_id))
 }
 
 async fn get_task_candidates_handler(
@@ -532,18 +722,801 @@ async fn get_task_candidates_handler(
     Query(query): Query<CandidateQuery>,
 ) -> Json<Vec<CandidateSummary>> {
     let include_disqualified = query.include_disqualified.unwrap_or(false);
-    Json(
-        state
-            .api
-            .get_task_candidates(&task_id, include_disqualified),
-    )
+    let api = state.api.read().expect("api lock should be readable");
+    Json(api.get_task_candidates(&task_id, include_disqualified))
 }
 
 async fn get_run_output_handler(
     State(state): State<ApiState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> Json<Vec<RunOutputChunk>> {
-    Json(state.api.get_run_output(&run_id))
+    let api = state.api.read().expect("api lock should be readable");
+    Json(api.get_run_output(&run_id))
+}
+
+#[derive(Debug, Serialize)]
+struct ApiErrorResponse {
+    error: String,
+}
+
+fn bad_request_error(message: impl Into<String>) -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiErrorResponse {
+            error: message.into(),
+        }),
+    )
+}
+
+fn conflict_error(message: impl Into<String>) -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiErrorResponse {
+            error: message.into(),
+        }),
+    )
+}
+
+fn require_active_lease_holder_epoch(
+    current_lease: Option<trace_lease::LeaseState>,
+    payload: &Value,
+    context: &str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    let current_lease =
+        current_lease.ok_or_else(|| conflict_error("lease is not currently claimed"))?;
+    if !current_lease.active {
+        return Err(conflict_error("lease is not currently claimed"));
+    }
+
+    let provided_holder = payload_string(
+        payload,
+        &["worker_id", "holder", "claimed_by", "released_by"],
+    )
+    .ok_or_else(|| bad_request_error(format!("{context} requires worker_id")))?;
+    let expected_holder = current_lease
+        .holder
+        .unwrap_or_else(|| "unknown".to_string());
+    if expected_holder != provided_holder {
+        return Err(conflict_error(format!(
+            "lease holder mismatch: expected={expected_holder}, provided={provided_holder}"
+        )));
+    }
+
+    let provided_epoch = payload_u64(payload, &["lease_epoch", "epoch"])
+        .ok_or_else(|| bad_request_error(format!("{context} requires lease_epoch")))?;
+    if provided_epoch != current_lease.lease_epoch {
+        return Err(conflict_error(format!(
+            "stale lease epoch: provided={provided_epoch}, current={}",
+            current_lease.lease_epoch
+        )));
+    }
+
+    Ok(())
+}
+
+fn enforce_lease_fence(
+    lease_store: &LeaseIndexStore,
+    event: &NewTraceEvent,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    let current_lease = lease_store
+        .current_lease(&event.task_id)
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    match &event.kind {
+        EventKind::TaskClaimed => {
+            let current_epoch = current_lease
+                .as_ref()
+                .map(|lease| lease.lease_epoch)
+                .unwrap_or(0);
+
+            if let Some(provided_epoch) = payload_u64(&event.payload, &["lease_epoch", "epoch"]) {
+                if provided_epoch < current_epoch {
+                    return Err(conflict_error(format!(
+                        "stale claim epoch: provided={provided_epoch}, current={current_epoch}"
+                    )));
+                }
+            }
+
+            if let Some(current_lease) = current_lease {
+                if current_lease.active {
+                    let holder = current_lease
+                        .holder
+                        .unwrap_or_else(|| "unknown".to_string());
+                    return Err(conflict_error(format!(
+                        "task already claimed by {holder} at epoch {}",
+                        current_lease.lease_epoch
+                    )));
+                }
+            }
+        }
+        EventKind::TaskRenewed => {
+            require_active_lease_holder_epoch(current_lease, &event.payload, "task renewal")?;
+        }
+        EventKind::TaskReleased => {
+            require_active_lease_holder_epoch(current_lease, &event.payload, "task release")?;
+        }
+        EventKind::RunStarted => {
+            require_active_lease_holder_epoch(current_lease, &event.payload, "run start")?;
+        }
+        EventKind::RunnerOutput => {
+            require_active_lease_holder_epoch(current_lease, &event.payload, "run output")?;
+        }
+        EventKind::ChangesetCreated => {
+            if let Some(current_lease) = current_lease {
+                if !current_lease.active {
+                    return Err(conflict_error("lease is not currently claimed"));
+                }
+
+                let provided_epoch = payload_u64(&event.payload, &["lease_epoch", "epoch"])
+                    .ok_or_else(|| bad_request_error("changeset requires lease_epoch"))?;
+                if provided_epoch != current_lease.lease_epoch {
+                    return Err(conflict_error(format!(
+                        "stale candidate lease epoch: provided={provided_epoch}, current={}",
+                        current_lease.lease_epoch
+                    )));
+                }
+
+                if let Some(provided_holder) =
+                    payload_string(&event.payload, &["worker_id", "holder", "claimed_by"])
+                {
+                    let expected_holder = current_lease
+                        .holder
+                        .unwrap_or_else(|| "unknown".to_string());
+                    if provided_holder != expected_holder {
+                        return Err(conflict_error(format!(
+                            "lease holder mismatch: expected={expected_holder}, provided={provided_holder}"
+                        )));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn persist_event_locked(
+    state: &ApiState,
+    new_event: NewTraceEvent,
+) -> Result<TraceEvent, (StatusCode, Json<ApiErrorResponse>)> {
+    if new_event.global_seq.is_some() {
+        return Err(bad_request_error(
+            "new events must not include global_seq before persist",
+        ));
+    }
+
+    enforce_lease_fence(&state.lease_store, &new_event)?;
+
+    let persisted = state
+        .event_store
+        .append_event(new_event)
+        .map_err(map_store_error)?;
+    state
+        .lease_store
+        .apply_event(&persisted)
+        .map_err(|error| internal_error(error.to_string()))?;
+    state
+        .replay_store
+        .set_checkpoint_global_seq(persisted.global_seq)
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    let refreshed = TraceApi::from_store(&state.event_store)
+        .map_err(|error| internal_error(error.to_string()))?;
+    {
+        let mut api = state.api.write().expect("api lock should be writable");
+        *api = refreshed;
+    }
+
+    Ok(persisted)
+}
+
+fn now_utc_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn event_ts_or_now(ts: Option<String>) -> String {
+    ts.unwrap_or_else(now_utc_rfc3339)
+}
+
+fn maybe_insert_string(
+    payload: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<String>,
+) {
+    if let Some(value) = value {
+        payload.insert(key.to_string(), Value::String(value));
+    }
+}
+
+fn trace_root_from_event_store(event_store: &EventStore) -> PathBuf {
+    event_store
+        .canonical_log_path()
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn sanitize_report_id(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "benchmark".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn parse_rfc3339(ts: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(ts, &Rfc3339).ok()
+}
+
+fn duration_ms(started_at: Option<&str>, completed_at: Option<&str>) -> Option<i64> {
+    let started = parse_rfc3339(started_at?)?;
+    let completed = parse_rfc3339(completed_at?)?;
+    let delta_ms = (completed - started).whole_milliseconds();
+    if delta_ms < 0 {
+        return None;
+    }
+    i64::try_from(delta_ms).ok()
+}
+
+fn infer_passed(payload: &Value) -> Option<bool> {
+    if let Some(passed) = payload_bool(payload, &["pass", "passed", "success"]) {
+        return Some(passed);
+    }
+    let verdict = payload_string(payload, &["verdict", "result", "outcome", "status"])?;
+    match verdict.to_ascii_lowercase().as_str() {
+        "pass" | "passed" | "ok" | "success" | "approved" => Some(true),
+        "fail" | "failed" | "error" | "reject" | "rejected" => Some(false),
+        _ => None,
+    }
+}
+
+fn build_model_key(model: Option<&str>, provider: Option<&str>, profile: Option<&str>) -> String {
+    let model = model.unwrap_or("unknown-model");
+    let provider = provider.unwrap_or("unknown-provider");
+    let profile = profile.unwrap_or("unknown-profile");
+    format!("{provider}:{model}:{profile}")
+}
+
+fn build_benchmark_report(report_id: String, events: &[TraceEvent]) -> BenchmarkReport {
+    let mut ordered = events.to_vec();
+    ordered.sort_by_key(|event| event.global_seq);
+
+    let api = TraceApi::from_events(ordered.clone());
+    let mut runs: HashMap<String, BenchmarkRunSummary> = HashMap::new();
+
+    for event in &ordered {
+        let Some(run_id) = &event.run_id else {
+            continue;
+        };
+
+        let entry = runs
+            .entry(run_id.clone())
+            .or_insert_with(|| BenchmarkRunSummary {
+                run_id: run_id.clone(),
+                task_id: event.task_id.clone(),
+                model: None,
+                provider: None,
+                profile: None,
+                worker_id: None,
+                lease_epoch: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                candidate_total: 0,
+                candidate_eligible: 0,
+                candidate_disqualified: 0,
+                output_chunks: 0,
+                output_bytes: 0,
+                verdict: None,
+                passed: None,
+            });
+
+        entry.task_id = event.task_id.clone();
+        entry.completed_at = Some(event.ts.clone());
+
+        match &event.kind {
+            EventKind::RunStarted => {
+                entry.started_at = Some(event.ts.clone());
+                entry.model = payload_string(&event.payload, &["model", "model_name"]);
+                entry.provider = payload_string(&event.payload, &["provider"]);
+                entry.profile = payload_string(&event.payload, &["profile", "lane"]);
+                entry.worker_id = payload_string(&event.payload, &["worker_id", "holder"]);
+                entry.lease_epoch = payload_u64(&event.payload, &["lease_epoch", "epoch"]);
+            }
+            EventKind::RunnerOutput => {
+                if let Ok(parsed) = validate_runner_output_payload(&event.payload) {
+                    entry.output_chunks = entry.output_chunks.saturating_add(1);
+                    entry.output_bytes = entry.output_bytes.saturating_add(parsed.chunk.len());
+                }
+            }
+            EventKind::VerdictRecorded => {
+                entry.verdict = payload_string(&event.payload, &["verdict", "result", "outcome"]);
+                entry.passed = infer_passed(&event.payload);
+            }
+            _ => {}
+        }
+    }
+
+    for task in api.get_tasks() {
+        for candidate in api.get_task_candidates(&task.task.task_id, true) {
+            let entry =
+                runs.entry(candidate.run_id.clone())
+                    .or_insert_with(|| BenchmarkRunSummary {
+                        run_id: candidate.run_id.clone(),
+                        task_id: candidate.task_id.clone(),
+                        model: None,
+                        provider: None,
+                        profile: None,
+                        worker_id: None,
+                        lease_epoch: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                        candidate_total: 0,
+                        candidate_eligible: 0,
+                        candidate_disqualified: 0,
+                        output_chunks: 0,
+                        output_bytes: 0,
+                        verdict: None,
+                        passed: None,
+                    });
+
+            entry.task_id = candidate.task_id.clone();
+            entry.candidate_total = entry.candidate_total.saturating_add(1);
+            if candidate.eligible {
+                entry.candidate_eligible = entry.candidate_eligible.saturating_add(1);
+            } else {
+                entry.candidate_disqualified = entry.candidate_disqualified.saturating_add(1);
+            }
+        }
+    }
+
+    for run in runs.values_mut() {
+        run.duration_ms = duration_ms(run.started_at.as_deref(), run.completed_at.as_deref());
+    }
+
+    let mut model_map: HashMap<String, BenchmarkModelSummary> = HashMap::new();
+    let mut model_duration_sums: HashMap<String, (i64, usize)> = HashMap::new();
+
+    for run in runs.values() {
+        let key = build_model_key(
+            run.model.as_deref(),
+            run.provider.as_deref(),
+            run.profile.as_deref(),
+        );
+
+        let model = model_map
+            .entry(key.clone())
+            .or_insert_with(|| BenchmarkModelSummary {
+                model_key: key.clone(),
+                model: run.model.clone(),
+                provider: run.provider.clone(),
+                profile: run.profile.clone(),
+                runs: 0,
+                pass_count: 0,
+                fail_count: 0,
+                candidate_total: 0,
+                candidate_eligible: 0,
+                candidate_disqualified: 0,
+                output_bytes: 0,
+                avg_duration_ms: None,
+            });
+
+        model.runs = model.runs.saturating_add(1);
+        model.candidate_total = model.candidate_total.saturating_add(run.candidate_total);
+        model.candidate_eligible = model
+            .candidate_eligible
+            .saturating_add(run.candidate_eligible);
+        model.candidate_disqualified = model
+            .candidate_disqualified
+            .saturating_add(run.candidate_disqualified);
+        model.output_bytes = model.output_bytes.saturating_add(run.output_bytes);
+
+        if run.passed == Some(true) {
+            model.pass_count = model.pass_count.saturating_add(1);
+        } else if run.passed == Some(false) {
+            model.fail_count = model.fail_count.saturating_add(1);
+        }
+
+        if let Some(duration_ms) = run.duration_ms {
+            let entry = model_duration_sums.entry(key).or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(duration_ms);
+            entry.1 = entry.1.saturating_add(1);
+        }
+    }
+
+    let mut model_summaries = model_map.into_values().collect::<Vec<_>>();
+    model_summaries.sort_by(|left, right| left.model_key.cmp(&right.model_key));
+    for model in &mut model_summaries {
+        if let Some((sum, count)) = model_duration_sums.get(&model.model_key) {
+            if *count > 0 {
+                model.avg_duration_ms = Some(*sum as f64 / *count as f64);
+            }
+        }
+    }
+
+    let mut run_summaries = runs.into_values().collect::<Vec<_>>();
+    run_summaries.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+
+    BenchmarkReport {
+        report_id,
+        generated_at: now_utc_rfc3339(),
+        total_events: ordered.len(),
+        total_tasks: api.get_tasks().len(),
+        total_runs: run_summaries.len(),
+        models: model_summaries,
+        runs: run_summaries,
+    }
+}
+
+fn render_benchmark_markdown(report: &BenchmarkReport) -> String {
+    let mut markdown = String::new();
+    markdown.push_str(&format!(
+        "# TRACE Benchmark Report: {}\n\n",
+        report.report_id
+    ));
+    markdown.push_str(&format!("Generated at: {}\n\n", report.generated_at));
+    markdown.push_str(&format!(
+        "- Total events: {}\n- Total tasks: {}\n- Total runs: {}\n\n",
+        report.total_events, report.total_tasks, report.total_runs
+    ));
+
+    markdown.push_str("## Model Summary\n\n");
+    markdown.push_str("| Model Key | Runs | Pass | Fail | Eligible | Disqualified | Output Bytes | Avg Duration (ms) |\n");
+    markdown.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+    for model in &report.models {
+        let avg_duration = model
+            .avg_duration_ms
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        markdown.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            model.model_key,
+            model.runs,
+            model.pass_count,
+            model.fail_count,
+            model.candidate_eligible,
+            model.candidate_disqualified,
+            model.output_bytes,
+            avg_duration
+        ));
+    }
+
+    markdown.push_str("\n## Run Summary\n\n");
+    markdown.push_str("| Run ID | Task ID | Model | Candidates | Eligible | Disqualified | Verdict | Passed | Duration (ms) |\n");
+    markdown.push_str("| --- | --- | --- | ---: | ---: | ---: | --- | --- | ---: |\n");
+    for run in &report.runs {
+        let model = build_model_key(
+            run.model.as_deref(),
+            run.provider.as_deref(),
+            run.profile.as_deref(),
+        );
+        let verdict = run.verdict.clone().unwrap_or_else(|| "-".to_string());
+        let passed = run
+            .passed
+            .map(|value| {
+                if value {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            })
+            .unwrap_or_else(|| "-".to_string());
+        let duration = run
+            .duration_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        markdown.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            run.run_id,
+            run.task_id,
+            model,
+            run.candidate_total,
+            run.candidate_eligible,
+            run.candidate_disqualified,
+            verdict,
+            passed,
+            duration
+        ));
+    }
+
+    markdown
+}
+
+async fn post_event_handler(
+    State(state): State<ApiState>,
+    Json(new_event): Json<NewTraceEvent>,
+) -> Result<(StatusCode, Json<TraceEvent>), (StatusCode, Json<ApiErrorResponse>)> {
+    let _writer_guard = state.writer_lock.lock().await;
+    let persisted = persist_event_locked(&state, new_event)?;
+    Ok((StatusCode::CREATED, Json(persisted)))
+}
+
+async fn post_task_claim_handler(
+    State(state): State<ApiState>,
+    AxumPath(task_id): AxumPath<String>,
+    Json(request): Json<TaskClaimRequest>,
+) -> Result<(StatusCode, Json<TraceEvent>), (StatusCode, Json<ApiErrorResponse>)> {
+    let _writer_guard = state.writer_lock.lock().await;
+
+    let current_lease = state
+        .lease_store
+        .current_lease(&task_id)
+        .map_err(|error| internal_error(error.to_string()))?;
+    let current_epoch = current_lease
+        .as_ref()
+        .map(|lease| lease.lease_epoch)
+        .unwrap_or(0);
+
+    if let Some(lease) = current_lease {
+        if lease.active {
+            let holder = lease.holder.unwrap_or_else(|| "unknown".to_string());
+            return Err(conflict_error(format!(
+                "task already claimed by {holder} at epoch {}",
+                lease.lease_epoch
+            )));
+        }
+    }
+
+    if let Some(expected_epoch) = request.expected_epoch {
+        if expected_epoch != current_epoch {
+            return Err(conflict_error(format!(
+                "claim epoch mismatch: expected={expected_epoch}, current={current_epoch}"
+            )));
+        }
+    }
+
+    let next_epoch = current_epoch.saturating_add(1);
+    let mut payload = serde_json::Map::new();
+    payload.insert("worker_id".to_string(), Value::String(request.worker_id));
+    payload.insert("epoch".to_string(), Value::from(next_epoch));
+    payload.insert("lease_epoch".to_string(), Value::from(next_epoch));
+    maybe_insert_string(&mut payload, "title", request.title);
+    maybe_insert_string(&mut payload, "owner", request.owner);
+    maybe_insert_string(&mut payload, "reason", request.reason);
+
+    let new_event = NewTraceEvent {
+        global_seq: None,
+        ts: event_ts_or_now(request.ts),
+        task_id,
+        run_id: None,
+        kind: EventKind::TaskClaimed,
+        payload: Value::Object(payload),
+    };
+
+    let persisted = persist_event_locked(&state, new_event)?;
+    Ok((StatusCode::CREATED, Json(persisted)))
+}
+
+async fn post_task_renew_handler(
+    State(state): State<ApiState>,
+    AxumPath(task_id): AxumPath<String>,
+    Json(request): Json<TaskLeaseUpdateRequest>,
+) -> Result<(StatusCode, Json<TraceEvent>), (StatusCode, Json<ApiErrorResponse>)> {
+    let _writer_guard = state.writer_lock.lock().await;
+
+    let payload = serde_json::json!({
+        "worker_id": request.worker_id,
+        "epoch": request.lease_epoch,
+        "lease_epoch": request.lease_epoch,
+        "reason": request.reason,
+    });
+
+    let new_event = NewTraceEvent {
+        global_seq: None,
+        ts: event_ts_or_now(request.ts),
+        task_id,
+        run_id: None,
+        kind: EventKind::TaskRenewed,
+        payload,
+    };
+
+    let persisted = persist_event_locked(&state, new_event)?;
+    Ok((StatusCode::CREATED, Json(persisted)))
+}
+
+async fn post_task_release_handler(
+    State(state): State<ApiState>,
+    AxumPath(task_id): AxumPath<String>,
+    Json(request): Json<TaskLeaseUpdateRequest>,
+) -> Result<(StatusCode, Json<TraceEvent>), (StatusCode, Json<ApiErrorResponse>)> {
+    let _writer_guard = state.writer_lock.lock().await;
+
+    let payload = serde_json::json!({
+        "worker_id": request.worker_id,
+        "released_by": request.worker_id,
+        "epoch": request.lease_epoch,
+        "lease_epoch": request.lease_epoch,
+        "reason": request.reason,
+    });
+
+    let new_event = NewTraceEvent {
+        global_seq: None,
+        ts: event_ts_or_now(request.ts),
+        task_id,
+        run_id: None,
+        kind: EventKind::TaskReleased,
+        payload,
+    };
+
+    let persisted = persist_event_locked(&state, new_event)?;
+    Ok((StatusCode::CREATED, Json(persisted)))
+}
+
+async fn post_run_started_handler(
+    State(state): State<ApiState>,
+    AxumPath(task_id): AxumPath<String>,
+    Json(request): Json<RunStartRequest>,
+) -> Result<(StatusCode, Json<TraceEvent>), (StatusCode, Json<ApiErrorResponse>)> {
+    let _writer_guard = state.writer_lock.lock().await;
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("worker_id".to_string(), Value::String(request.worker_id));
+    payload.insert("epoch".to_string(), Value::from(request.lease_epoch));
+    payload.insert("lease_epoch".to_string(), Value::from(request.lease_epoch));
+    maybe_insert_string(&mut payload, "model", request.model);
+    maybe_insert_string(&mut payload, "provider", request.provider);
+    maybe_insert_string(&mut payload, "profile", request.profile);
+    maybe_insert_string(&mut payload, "prompt_id", request.prompt_id);
+    if let Some(temperature) = request.temperature {
+        if let Some(value) = serde_json::Number::from_f64(temperature) {
+            payload.insert("temperature".to_string(), Value::Number(value));
+        }
+    }
+
+    let new_event = NewTraceEvent {
+        global_seq: None,
+        ts: event_ts_or_now(request.ts),
+        task_id,
+        run_id: Some(request.run_id),
+        kind: EventKind::RunStarted,
+        payload: Value::Object(payload),
+    };
+
+    let persisted = persist_event_locked(&state, new_event)?;
+    Ok((StatusCode::CREATED, Json(persisted)))
+}
+
+async fn post_run_output_handler(
+    State(state): State<ApiState>,
+    AxumPath((task_id, run_id)): AxumPath<(String, String)>,
+    Json(request): Json<RunOutputRequest>,
+) -> Result<(StatusCode, Json<TraceEvent>), (StatusCode, Json<ApiErrorResponse>)> {
+    let _writer_guard = state.writer_lock.lock().await;
+
+    let payload = serde_json::json!({
+        "worker_id": request.worker_id,
+        "epoch": request.lease_epoch,
+        "lease_epoch": request.lease_epoch,
+        "stream": request.stream,
+        "encoding": request.encoding,
+        "chunk": request.chunk,
+        "chunk_index": request.chunk_index,
+        "final": request.final_chunk,
+    });
+
+    let new_event = NewTraceEvent {
+        global_seq: None,
+        ts: event_ts_or_now(request.ts),
+        task_id,
+        run_id: Some(run_id),
+        kind: EventKind::RunnerOutput,
+        payload,
+    };
+
+    let persisted = persist_event_locked(&state, new_event)?;
+    Ok((StatusCode::CREATED, Json(persisted)))
+}
+
+async fn post_candidate_create_handler(
+    State(state): State<ApiState>,
+    AxumPath((task_id, run_id)): AxumPath<(String, String)>,
+    Json(request): Json<CandidateCreateRequest>,
+) -> Result<(StatusCode, Json<TraceEvent>), (StatusCode, Json<ApiErrorResponse>)> {
+    let _writer_guard = state.writer_lock.lock().await;
+
+    let candidate_id = request
+        .candidate_id
+        .unwrap_or_else(|| format!("CAND-{task_id}-{run_id}-{}", request.lease_epoch));
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("candidate_id".to_string(), Value::String(candidate_id));
+    payload.insert("worker_id".to_string(), Value::String(request.worker_id));
+    payload.insert("epoch".to_string(), Value::from(request.lease_epoch));
+    payload.insert("lease_epoch".to_string(), Value::from(request.lease_epoch));
+    if let Some(stale) = request.stale {
+        payload.insert("stale".to_string(), Value::Bool(stale));
+    }
+    maybe_insert_string(&mut payload, "reason", request.reason);
+
+    let new_event = NewTraceEvent {
+        global_seq: None,
+        ts: event_ts_or_now(request.ts),
+        task_id,
+        run_id: Some(run_id),
+        kind: EventKind::ChangesetCreated,
+        payload: Value::Object(payload),
+    };
+
+    let persisted = persist_event_locked(&state, new_event)?;
+    Ok((StatusCode::CREATED, Json(persisted)))
+}
+
+async fn post_benchmark_evaluate_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<BenchmarkEvaluateRequest>,
+) -> Result<Json<BenchmarkEvaluateResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let events = state
+        .event_store
+        .read_all_events()
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    let default_report_id = format!(
+        "bench-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let report_id = sanitize_report_id(request.report_id.as_deref().unwrap_or(&default_report_id));
+    let report = build_benchmark_report(report_id.clone(), &events);
+
+    let root = trace_root_from_event_store(&state.event_store);
+    let reports_dir = root.join(".trace/reports");
+    std::fs::create_dir_all(&reports_dir).map_err(|error| internal_error(error.to_string()))?;
+
+    let json_report_path = reports_dir.join(format!("{report_id}.json"));
+    let markdown_report_path = reports_dir.join(format!("{report_id}.md"));
+
+    let json_report =
+        serde_json::to_string_pretty(&report).map_err(|error| internal_error(error.to_string()))?;
+    std::fs::write(&json_report_path, json_report)
+        .map_err(|error| internal_error(error.to_string()))?;
+    std::fs::write(&markdown_report_path, render_benchmark_markdown(&report))
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(BenchmarkEvaluateResponse {
+        report_id,
+        json_report_path: json_report_path.to_string_lossy().to_string(),
+        markdown_report_path: markdown_report_path.to_string_lossy().to_string(),
+        summary: BenchmarkSummary {
+            total_tasks: report.total_tasks,
+            total_runs: report.total_runs,
+            total_events: report.total_events,
+            models: report.models.clone(),
+        },
+    }))
+}
+
+fn map_store_error(error: std::io::Error) -> (StatusCode, Json<ApiErrorResponse>) {
+    match error.kind() {
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            bad_request_error(error.to_string())
+        }
+        _ => internal_error(error.to_string()),
+    }
+}
+
+fn internal_error(message: String) -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiErrorResponse { error: message }),
+    )
 }
 
 #[cfg(test)]
@@ -557,7 +1530,7 @@ mod tests {
     use serde_json::{json, Value};
     use tower::util::ServiceExt;
     use trace_events::{EventKind, NewTraceEvent};
-    use trace_lease::ReplayCheckpointStore;
+    use trace_lease::{LeaseIndexStore, ReplayCheckpointStore};
     use trace_store::EventStore;
 
     use super::{app_router, bootstrap_runtime, TraceApi, PHASE0_ENDPOINTS};
@@ -651,6 +1624,25 @@ mod tests {
         store
     }
 
+    fn build_test_app(root: &std::path::Path, store: &EventStore) -> axum::Router {
+        let api = TraceApi::from_store(store).expect("projection should build");
+        let lease_store = LeaseIndexStore::new(root).expect("lease store should initialize");
+        let replay_store =
+            ReplayCheckpointStore::new(root).expect("replay checkpoint store should initialize");
+
+        let events = store
+            .read_all_events()
+            .expect("seeded events should be readable");
+        lease_store
+            .replay_events(&events)
+            .expect("lease index should replay seeded events");
+        replay_store
+            .replay_to_tip(events.last().map(|event| event.global_seq).unwrap_or(0))
+            .expect("checkpoint should advance to seeded tip");
+
+        app_router(api, store.clone(), lease_store, replay_store)
+    }
+
     #[test]
     fn test_phase0_endpoint_set_is_locked() {
         assert_eq!(PHASE0_ENDPOINTS.len(), 6);
@@ -699,8 +1691,7 @@ mod tests {
     async fn test_tasks_route_returns_nested_shape() {
         let root = unique_temp_root();
         let store = seed_event_log(&root);
-        let api = TraceApi::from_store(&store).expect("projection should build");
-        let app = app_router(api);
+        let app = build_test_app(&root, &store);
 
         let response = app
             .oneshot(
@@ -730,8 +1721,7 @@ mod tests {
     async fn test_candidates_route_honors_query_toggle() {
         let root = unique_temp_root();
         let store = seed_event_log(&root);
-        let api = TraceApi::from_store(&store).expect("projection should build");
-        let app = app_router(api);
+        let app = build_test_app(&root, &store);
 
         let default_response = app
             .clone()
@@ -774,6 +1764,100 @@ mod tests {
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
+    #[tokio::test]
+    async fn test_post_events_appends_and_refreshes_projection() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let event_payload = json!({
+            "global_seq": null,
+            "ts": "2026-02-28T05:25:00.000Z",
+            "task_id": "TASK-77",
+            "run_id": null,
+            "kind": "task.claimed",
+            "payload": {
+                "epoch": 1,
+                "worker_id": "agent-9",
+                "title": "New concurrent write task"
+            }
+        });
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(event_payload.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(create_response.status(), axum::http::StatusCode::CREATED);
+        let create_body = to_bytes(create_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let persisted: Value = serde_json::from_slice(&create_body).expect("response should parse");
+        assert!(persisted.get("global_seq").is_some());
+
+        let tasks_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let tasks_body = to_bytes(tasks_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let tasks: Vec<Value> = serde_json::from_slice(&tasks_body).expect("response should parse");
+
+        assert!(tasks
+            .iter()
+            .any(|task| task["task"]["task_id"].as_str() == Some("TASK-77")));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_post_events_rejects_preassigned_global_seq() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let invalid_event = json!({
+            "global_seq": 999,
+            "ts": "2026-02-28T05:26:00.000Z",
+            "task_id": "TASK-42",
+            "run_id": null,
+            "kind": "task.claimed",
+            "payload": { "epoch": 8 }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(invalid_event.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
     #[test]
     fn test_startup_replay_reaches_tip_before_guard() {
         let root = unique_temp_root();
@@ -791,6 +1875,490 @@ mod tests {
                 .expect("checkpoint should exist"),
             store.tip_global_seq().expect("tip should read")
         );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_post_events_rejects_stale_claim_epoch() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let stale_claim = json!({
+            "global_seq": null,
+            "ts": "2026-02-28T05:27:00.000Z",
+            "task_id": "TASK-42",
+            "run_id": null,
+            "kind": "task.claimed",
+            "payload": { "epoch": 6, "worker_id": "agent-9" }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(stale_claim.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_post_events_rejects_stale_candidate_epoch() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let stale_candidate = json!({
+            "global_seq": null,
+            "ts": "2026-02-28T05:28:00.000Z",
+            "task_id": "TASK-42",
+            "run_id": "RUN-21",
+            "kind": "changeset.created",
+            "payload": { "candidate_id": "C-200", "lease_epoch": 6 }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(stale_candidate.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_typed_claim_renew_release_flow() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-100/claim")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-alpha",
+                            "expected_epoch": 0,
+                            "title": "Typed claim route",
+                            "owner": "runtime"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(claim.status(), axum::http::StatusCode::CREATED);
+
+        let renew = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-100/renew")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-alpha",
+                            "lease_epoch": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(renew.status(), axum::http::StatusCode::CREATED);
+
+        let release = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-100/release")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-alpha",
+                            "lease_epoch": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(release.status(), axum::http::StatusCode::CREATED);
+
+        let stale_claim = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-100/claim")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-beta",
+                            "expected_epoch": 0
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(stale_claim.status(), axum::http::StatusCode::CONFLICT);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_typed_run_output_candidate_routes_enforce_lease() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-200/claim")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-runner",
+                            "expected_epoch": 0
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(claim.status(), axum::http::StatusCode::CREATED);
+
+        let bad_run_start = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-200/runs/start")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "run_id": "RUN-T200",
+                            "worker_id": "wrong-holder",
+                            "lease_epoch": 1,
+                            "model": "gpt-5-high",
+                            "provider": "openai",
+                            "profile": "high"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(bad_run_start.status(), axum::http::StatusCode::CONFLICT);
+
+        let run_start = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-200/runs/start")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "run_id": "RUN-T200",
+                            "worker_id": "agent-runner",
+                            "lease_epoch": 1,
+                            "model": "gpt-5-high",
+                            "provider": "openai",
+                            "profile": "high"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(run_start.status(), axum::http::StatusCode::CREATED);
+
+        let stale_output = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-200/runs/RUN-T200/output")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-runner",
+                            "lease_epoch": 0,
+                            "stream": "stdout",
+                            "encoding": "utf8",
+                            "chunk": "oops",
+                            "chunk_index": 0,
+                            "final": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(stale_output.status(), axum::http::StatusCode::CONFLICT);
+
+        let good_output = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-200/runs/RUN-T200/output")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-runner",
+                            "lease_epoch": 1,
+                            "stream": "stdout",
+                            "encoding": "utf8",
+                            "chunk": "ok",
+                            "chunk_index": 1,
+                            "final": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(good_output.status(), axum::http::StatusCode::CREATED);
+
+        let bad_candidate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-200/runs/RUN-T200/candidates")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "wrong-holder",
+                            "lease_epoch": 1,
+                            "candidate_id": "C-T200-1"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(bad_candidate.status(), axum::http::StatusCode::CONFLICT);
+
+        let good_candidate = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-200/runs/RUN-T200/candidates")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-runner",
+                            "lease_epoch": 1,
+                            "candidate_id": "C-T200-2"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(good_candidate.status(), axum::http::StatusCode::CREATED);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_evaluate_writes_json_and_markdown_reports() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let _claim = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-BENCH/claim")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-bench",
+                            "expected_epoch": 0
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _run_start = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-BENCH/runs/start")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "run_id": "RUN-BENCH-1",
+                            "worker_id": "agent-bench",
+                            "lease_epoch": 1,
+                            "model": "gpt-5-flash",
+                            "provider": "openai",
+                            "profile": "flash"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _output = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-BENCH/runs/RUN-BENCH-1/output")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-bench",
+                            "lease_epoch": 1,
+                            "stream": "stdout",
+                            "encoding": "utf8",
+                            "chunk": "benchmark output",
+                            "chunk_index": 0,
+                            "final": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _candidate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-BENCH/runs/RUN-BENCH-1/candidates")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-bench",
+                            "lease_epoch": 1,
+                            "candidate_id": "C-BENCH-1"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _verdict = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "global_seq": null,
+                            "ts": "2026-02-28T05:35:00.000Z",
+                            "task_id": "TASK-BENCH",
+                            "run_id": "RUN-BENCH-1",
+                            "kind": "verdict.recorded",
+                            "payload": {
+                                "verdict": "pass"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/benchmarks/evaluate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "report_id": "bench_test_report"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+
+        let json_report_path = parsed["json_report_path"]
+            .as_str()
+            .expect("json report path should exist");
+        let markdown_report_path = parsed["markdown_report_path"]
+            .as_str()
+            .expect("markdown report path should exist");
+
+        assert!(std::path::Path::new(json_report_path).exists());
+        assert!(std::path::Path::new(markdown_report_path).exists());
+
+        let report_json = fs::read_to_string(json_report_path).expect("report file should read");
+        let report_value: Value =
+            serde_json::from_str(&report_json).expect("report json should parse");
+        assert!(report_value["total_runs"].as_u64().unwrap_or(0) >= 1);
+        assert!(report_value["models"]
+            .as_array()
+            .map(|models| !models.is_empty())
+            .unwrap_or(false));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

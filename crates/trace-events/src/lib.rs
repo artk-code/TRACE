@@ -25,6 +25,12 @@ pub struct RunnerOutputPayload {
     pub chunk_index: u64,
     #[serde(rename = "final", default)]
     pub final_chunk: bool,
+    #[serde(default)]
+    pub worker_id: Option<String>,
+    #[serde(default)]
+    pub lease_epoch: Option<u64>,
+    #[serde(default)]
+    pub epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +176,9 @@ mod tests {
             chunk: "done".to_string(),
             chunk_index: 0,
             final_chunk: true,
+            worker_id: None,
+            lease_epoch: None,
+            epoch: None,
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");

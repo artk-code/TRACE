@@ -2,19 +2,23 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use trace_events::{NewTraceEvent, TraceEvent};
 
 pub const CANONICAL_EVENT_LOG_PATH: &str = ".trace/events/events.jsonl";
+pub const EVENT_LOG_LOCK_PATH: &str = ".trace/events/events.lock";
 
 #[derive(Debug, Clone)]
 pub struct EventStore {
     canonical_log_path: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl EventStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             canonical_log_path: root.as_ref().join(CANONICAL_EVENT_LOG_PATH),
+            lock_path: root.as_ref().join(EVENT_LOG_LOCK_PATH),
         }
     }
 
@@ -29,6 +33,17 @@ impl EventStore {
                 "new events must not include global_seq before persist",
             ));
         }
+
+        if let Some(parent) = self.lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.lock_path)?;
+        lock_file.lock_exclusive()?;
 
         if let Some(parent) = self.canonical_log_path.parent() {
             fs::create_dir_all(parent)?;
@@ -50,6 +65,9 @@ impl EventStore {
             .open(&self.canonical_log_path)?;
 
         writeln!(file, "{serialized}")?;
+        file.sync_data()?;
+
+        lock_file.unlock()?;
 
         Ok(persisted)
     }
@@ -101,6 +119,8 @@ mod tests {
     use std::env;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
 
     use serde_json::json;
     use trace_events::{EventKind, NewTraceEvent};
@@ -160,6 +180,44 @@ mod tests {
 
         assert_eq!(first.global_seq, 1);
         assert_eq!(second.global_seq, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn test_concurrent_appends_produce_unique_contiguous_sequences() {
+        let root = unique_temp_root();
+        let store = Arc::new(EventStore::new(&root));
+
+        let mut handles = Vec::new();
+        for thread_index in 0..8usize {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for event_index in 0..25usize {
+                    let task_id = format!("TASK-{thread_index}-{event_index}");
+                    store
+                        .append_event(new_event(&task_id))
+                        .expect("concurrent append should succeed");
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("worker thread should finish");
+        }
+
+        let mut seqs = store
+            .read_all_events()
+            .expect("events should be readable after concurrent appends")
+            .into_iter()
+            .map(|event| event.global_seq)
+            .collect::<Vec<_>>();
+        seqs.sort_unstable();
+
+        assert_eq!(seqs.len(), 200);
+        for (index, seq) in seqs.into_iter().enumerate() {
+            assert_eq!(seq, (index as u64) + 1);
+        }
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

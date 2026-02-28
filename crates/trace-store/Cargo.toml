@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+fs2.workspace = true
 serde_json.workspace = true
 trace-events = { path = "../trace-events" }
 
