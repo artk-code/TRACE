@@ -68,6 +68,28 @@ Build a working multi-agent evaluation system where multiple Codex terminals can
   - Regression gate for typed writer routes and report generation path.
   - E2E smoke gate for multi-agent benchmark + merge output.
 
+## Execution Plan (Super Smoketest Path)
+1. P0: Automate lane simulation.
+  - Add a repeatable script that runs Flash/High/Extra lanes against one shared TRACE root.
+  - Emit one benchmark report and fail non-zero if report missing or malformed.
+2. P1: Deterministic evaluator.
+  - Add seeded tasks + expected outputs.
+  - Compute pass/fail/quality from deterministic checks instead of event aggregation only.
+3. P2: Merge and PR output.
+  - Add candidate artifact contract (patch/diff references).
+  - Add merge event flow and materialize git-compatible branch/commit metadata.
+4. P3: UI + CLI workflow.
+  - UI: benchmark leaderboard + run breakdown + merge action visibility.
+  - CLI: typed write commands + benchmark + merge/PR output commands.
+
+## Sanity Test Matrix (Current)
+- `test_typed_claim_renew_release_flow`
+- `test_typed_run_output_candidate_routes_enforce_lease`
+- `test_typed_candidate_requires_active_lease`
+- `test_benchmark_evaluate_writes_json_and_markdown_reports`
+- `test_benchmark_evaluate_aggregates_multi_model_pass_fail`
+- `test_benchmark_report_id_is_sanitized_to_reports_directory`
+
 ## Core Contracts
 - Canonical persisted event shape:
   - `global_seq`, `ts`, `task_id`, `run_id?`, `kind`, `payload`

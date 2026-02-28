@@ -842,31 +842,31 @@ fn enforce_lease_fence(
             require_active_lease_holder_epoch(current_lease, &event.payload, "run output")?;
         }
         EventKind::ChangesetCreated => {
-            if let Some(current_lease) = current_lease {
-                if !current_lease.active {
-                    return Err(conflict_error("lease is not currently claimed"));
-                }
+            let current_lease =
+                current_lease.ok_or_else(|| conflict_error("lease is not currently claimed"))?;
+            if !current_lease.active {
+                return Err(conflict_error("lease is not currently claimed"));
+            }
 
-                let provided_epoch = payload_u64(&event.payload, &["lease_epoch", "epoch"])
-                    .ok_or_else(|| bad_request_error("changeset requires lease_epoch"))?;
-                if provided_epoch != current_lease.lease_epoch {
+            let provided_epoch = payload_u64(&event.payload, &["lease_epoch", "epoch"])
+                .ok_or_else(|| bad_request_error("changeset requires lease_epoch"))?;
+            if provided_epoch != current_lease.lease_epoch {
+                return Err(conflict_error(format!(
+                    "stale candidate lease epoch: provided={provided_epoch}, current={}",
+                    current_lease.lease_epoch
+                )));
+            }
+
+            if let Some(provided_holder) =
+                payload_string(&event.payload, &["worker_id", "holder", "claimed_by"])
+            {
+                let expected_holder = current_lease
+                    .holder
+                    .unwrap_or_else(|| "unknown".to_string());
+                if provided_holder != expected_holder {
                     return Err(conflict_error(format!(
-                        "stale candidate lease epoch: provided={provided_epoch}, current={}",
-                        current_lease.lease_epoch
+                        "lease holder mismatch: expected={expected_holder}, provided={provided_holder}"
                     )));
-                }
-
-                if let Some(provided_holder) =
-                    payload_string(&event.payload, &["worker_id", "holder", "claimed_by"])
-                {
-                    let expected_holder = current_lease
-                        .holder
-                        .unwrap_or_else(|| "unknown".to_string());
-                    if provided_holder != expected_holder {
-                        return Err(conflict_error(format!(
-                            "lease holder mismatch: expected={expected_holder}, provided={provided_holder}"
-                        )));
-                    }
                 }
             }
         }
@@ -2359,6 +2359,298 @@ mod tests {
             .as_array()
             .map(|models| !models.is_empty())
             .unwrap_or(false));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_typed_candidate_requires_active_lease() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-NO-LEASE/runs/RUN-X/candidates")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "agent-x",
+                            "lease_epoch": 1,
+                            "candidate_id": "C-NO-LEASE"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_evaluate_aggregates_multi_model_pass_fail() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let _claim_flash = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-LANE-FLASH/claim")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "flash-worker",
+                            "expected_epoch": 0
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _run_flash = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-LANE-FLASH/runs/start")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "run_id": "RUN-FLASH-1",
+                            "worker_id": "flash-worker",
+                            "lease_epoch": 1,
+                            "model": "gpt-5-flash",
+                            "provider": "openai",
+                            "profile": "flash"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _candidate_flash = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-LANE-FLASH/runs/RUN-FLASH-1/candidates")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "flash-worker",
+                            "lease_epoch": 1,
+                            "candidate_id": "C-FLASH-1"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _verdict_flash = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "global_seq": null,
+                            "ts": "2026-02-28T06:10:00.000Z",
+                            "task_id": "TASK-LANE-FLASH",
+                            "run_id": "RUN-FLASH-1",
+                            "kind": "verdict.recorded",
+                            "payload": { "verdict": "pass" }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _claim_high = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-LANE-HIGH/claim")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "high-worker",
+                            "expected_epoch": 0
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _run_high = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-LANE-HIGH/runs/start")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "run_id": "RUN-HIGH-1",
+                            "worker_id": "high-worker",
+                            "lease_epoch": 1,
+                            "model": "gpt-5-high",
+                            "provider": "openai",
+                            "profile": "high"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _candidate_high = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks/TASK-LANE-HIGH/runs/RUN-HIGH-1/candidates")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "worker_id": "high-worker",
+                            "lease_epoch": 1,
+                            "candidate_id": "C-HIGH-1"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let _verdict_high = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "global_seq": null,
+                            "ts": "2026-02-28T06:11:00.000Z",
+                            "task_id": "TASK-LANE-HIGH",
+                            "run_id": "RUN-HIGH-1",
+                            "kind": "verdict.recorded",
+                            "payload": { "verdict": "fail" }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/benchmarks/evaluate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "report_id": "bench_multi_lane"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        let models = parsed["summary"]["models"]
+            .as_array()
+            .expect("summary.models should exist");
+
+        let flash = models
+            .iter()
+            .find(|model| model["model_key"].as_str() == Some("openai:gpt-5-flash:flash"))
+            .expect("flash model summary should exist");
+        assert!(flash["pass_count"].as_u64().unwrap_or(0) >= 1);
+
+        let high = models
+            .iter()
+            .find(|model| model["model_key"].as_str() == Some("openai:gpt-5-high:high"))
+            .expect("high model summary should exist");
+        assert!(high["fail_count"].as_u64().unwrap_or(0) >= 1);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_report_id_is_sanitized_to_reports_directory() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/benchmarks/evaluate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "report_id": "../../escape/../name"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        let json_report_path = parsed["json_report_path"]
+            .as_str()
+            .expect("json report path should exist");
+        let markdown_report_path = parsed["markdown_report_path"]
+            .as_str()
+            .expect("markdown report path should exist");
+
+        assert!(!json_report_path.contains(".."));
+        assert!(!markdown_report_path.contains(".."));
+        assert!(json_report_path.contains(".trace/reports/"));
+        assert!(markdown_report_path.contains(".trace/reports/"));
+        assert!(std::path::Path::new(json_report_path).exists());
+        assert!(std::path::Path::new(markdown_report_path).exists());
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
