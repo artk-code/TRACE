@@ -51,39 +51,58 @@ Build a working multi-agent evaluation system where multiple Codex terminals can
 - CLI is read-only; it does not expose typed writer or benchmark commands.
 - CI does not yet run an end-to-end multi-agent smoke benchmark.
 
-## Active Priorities (Next Build)
-1. Ship multi-terminal smoke harness.
-  - Script end-to-end run for Flash/High/Extra profiles against one server.
-  - Emit one benchmark report artifact per smoke run.
-2. Add deterministic evaluator inputs.
-  - Seed known task set with expected outcomes.
-  - Score pass/fail + quality dimensions in report.
-3. Add candidate artifact + merge contracts.
-  - Extend `changeset.created` payload contract with code artifact references.
-  - Define merge strategy output event(s) for winner/stacked merge.
-4. Add git-compatible PR path.
-  - Materialize winner/merged output to branch + commit metadata.
-  - Produce machine-consumable PR payload/output (for `gh` or API handoff).
-5. Expose benchmark + merge flows in UI/CLI.
-  - Render model leaderboard and run breakdown from generated report files.
-  - Add CLI commands for typed writes, benchmark generation, and merge/PR flow.
-6. Add CI coverage for multi-writer + benchmark smoke.
-  - Regression gate for typed writer routes and report generation path.
-  - E2E smoke gate for multi-agent benchmark + merge output.
+## Web-Orchestration Blockers (Confirmed 2026-02-28)
+- Browser transport is blocked by default:
+  - web client defaults to same-origin calls, while local dev commonly runs web and API on different ports.
+  - no web proxy/CORS path has been formalized for smoke workflows yet.
+- Web UI is read-only:
+  - no actions for claim/run/output/candidate/benchmark generation.
+  - no actions for tmux session start/add-lane/add-pane/stop.
+- Server has no orchestration control-plane routes:
+  - no session lifecycle route surface for web callers.
+- Lane execution path is still manual:
+  - tmux lanes open interactive shells with operator copy/paste steps.
+- Benchmark artifacts are filesystem-oriented:
+  - `POST /benchmarks/evaluate` writes files and returns local paths, but no report retrieval/list route exists.
+- Deterministic evaluator dataset/scoring contract is still absent.
+- CI lacks end-to-end web-driven smoke coverage.
 
-## Execution Plan (Super Smoketest Path)
-1. P0: Automate lane simulation.
-  - Add a repeatable script that runs Flash/High/Extra lanes against one shared TRACE root.
-  - Emit one benchmark report and fail non-zero if report missing or malformed.
-2. P1: Deterministic evaluator.
-  - Add seeded tasks + expected outputs.
-  - Compute pass/fail/quality from deterministic checks instead of event aggregation only.
-3. P2: Merge and PR output.
-  - Add candidate artifact contract (patch/diff references).
-  - Add merge event flow and materialize git-compatible branch/commit metadata.
-4. P3: UI + CLI workflow.
-  - UI: benchmark leaderboard + run breakdown + merge action visibility.
-  - CLI: typed write commands + benchmark + merge/PR output commands.
+## Active Priorities (Web Smoke Path)
+1. Unblock web-to-server transport for local smoke.
+  - Standardize on either Vite proxy or explicit CORS policy.
+  - Add a regression check that web can call API from dev origin.
+2. Add orchestration control plane on the backend.
+  - Expose minimal routes to start/status/add-lane/add-pane/stop tmux sessions.
+  - Validate lane/profile/session inputs server-side.
+3. Add non-interactive lane runner mode.
+  - Keep current interactive mode for humans.
+  - Add deterministic scripted mode for web-triggered smoke runs.
+4. Add benchmark report retrieval routes.
+  - List report ids and fetch report JSON/markdown by id.
+  - Keep path sanitization and root scoping guarantees.
+5. Add web smoke UI actions.
+  - Start session, spawn lanes, run smoke, trigger benchmark, view model leaderboard.
+6. Add deterministic evaluator inputs.
+  - Seed known tasks and expected outputs.
+  - Move report scoring beyond aggregation-only.
+7. Add CI E2E smoke gate.
+  - Verify web-triggered orchestration produces event log + benchmark artifact.
+
+## Execution Plan (Web Smoke Control Plane v1)
+1. P0: Connectivity + control-plane skeleton.
+  - Land web/API connectivity contract (proxy or CORS).
+  - Land orchestration routes that wrap existing tmux scripts.
+2. P1: Automated lane execution.
+  - Add scripted lane mode that performs claim/run/output/candidate/release.
+  - Add smoke endpoint/workflow that launches Flash/High/Extra lanes.
+3. P2: Report retrieval + web workflow.
+  - Add report list/get routes and wire UI to trigger/read smoke reports.
+  - Show model summary table for smoke runs.
+4. P3: Deterministic evaluator + CI.
+  - Add seeded evaluator task pack and scoring rules.
+  - Add E2E CI gate for web-orchestrated smoke.
+5. P4: Merge/PR pipeline.
+  - Add candidate artifact references, merge strategy events, and git/PR output path.
 
 ## Tmux Orchestration Runbook (Now)
 Prerequisite:
