@@ -51,41 +51,37 @@ Build a working multi-agent evaluation system where multiple Codex terminals can
 - CLI is read-only; it does not expose typed writer or benchmark commands.
 - CI does not yet run an end-to-end multi-agent smoke benchmark.
 
-## Web-Orchestration Blockers (Confirmed 2026-02-28)
-- Browser transport is blocked by default:
-  - web client defaults to same-origin calls, while local dev commonly runs web and API on different ports.
-  - no web proxy/CORS path has been formalized for smoke workflows yet.
-- Web UI is read-only:
-  - no actions for claim/run/output/candidate/benchmark generation.
-  - no actions for tmux session start/add-lane/add-pane/stop.
-- Server has no orchestration control-plane routes:
-  - no session lifecycle route surface for web callers.
+## Web-Orchestration Blockers (Confirmed 2026-02-28, Post-Step-1)
+- Resolved: web transport contract now exists via server CORS policy (local dev origins + preflight coverage).
+- Server still has no orchestration control-plane routes:
+  - no route surface for tmux session lifecycle (`start`, `status`, `add-lane`, `add-pane`, `stop`).
+- Web UI is still read-only for orchestration:
+  - no POST actions for tmux orchestration commands.
+  - no write-path actions for claim/run/output/candidate from UI workflows.
 - Lane execution path is still manual:
-  - tmux lanes open interactive shells with operator copy/paste steps.
+  - lane panes open interactive shells and rely on copy/paste operator commands.
 - Benchmark artifacts are filesystem-oriented:
-  - `POST /benchmarks/evaluate` writes files and returns local paths, but no report retrieval/list route exists.
+  - `POST /benchmarks/evaluate` writes files and returns local paths, but no report retrieval/list route exists for the UI.
 - Deterministic evaluator dataset/scoring contract is still absent.
 - CI lacks end-to-end web-driven smoke coverage.
 
 ## Active Priorities (Web Smoke Path)
-1. Unblock web-to-server transport for local smoke.
-  - Standardize on either Vite proxy or explicit CORS policy.
-  - Add a regression check that web can call API from dev origin.
-2. Add orchestration control plane on the backend.
+1. Add orchestration control plane on the backend.
   - Expose minimal routes to start/status/add-lane/add-pane/stop tmux sessions.
-  - Validate lane/profile/session inputs server-side.
+  - Validate and constrain lane/profile/session/target inputs server-side.
+2. Add web orchestration actions.
+  - Add API client + UI controls for tmux session lifecycle operations.
+  - Surface status/errors clearly to operator.
 3. Add non-interactive lane runner mode.
   - Keep current interactive mode for humans.
   - Add deterministic scripted mode for web-triggered smoke runs.
 4. Add benchmark report retrieval routes.
   - List report ids and fetch report JSON/markdown by id.
   - Keep path sanitization and root scoping guarantees.
-5. Add web smoke UI actions.
-  - Start session, spawn lanes, run smoke, trigger benchmark, view model leaderboard.
-6. Add deterministic evaluator inputs.
+5. Add deterministic evaluator inputs.
   - Seed known tasks and expected outputs.
   - Move report scoring beyond aggregation-only.
-7. Add CI E2E smoke gate.
+6. Add CI E2E smoke gate.
   - Verify web-triggered orchestration produces event log + benchmark artifact.
 
 ## Execution Plan (Web Smoke Control Plane v1)

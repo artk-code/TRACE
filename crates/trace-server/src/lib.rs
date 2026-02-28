@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use trace_api_types::{
     CandidateSummary, OutputEncoding, RunOutputChunk, StatusDetail, Task, TaskResponse, TaskStatus,
@@ -37,6 +38,13 @@ pub const PHASE0_ENDPOINTS: [&str; 6] = [
     "GET /runs/:run_id/timeline",
     "GET /tasks/:task_id/candidates?include_disqualified=false",
     "GET /runs/:run_id/output",
+];
+
+const DEFAULT_CORS_ALLOWED_ORIGINS: [&str; 4] = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
 ];
 
 #[derive(Debug, Error)]
@@ -664,6 +672,7 @@ pub fn app_router(
             post(post_benchmark_evaluate_handler),
         )
         .with_state(state)
+        .layer(cors_layer())
 }
 
 pub async fn serve(addr: SocketAddr, root: impl AsRef<Path>) -> Result<(), ServerError> {
@@ -683,6 +692,37 @@ pub async fn serve(addr: SocketAddr, root: impl AsRef<Path>) -> Result<(), Serve
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn cors_layer() -> CorsLayer {
+    let configured = std::env::var("TRACE_CORS_ALLOW_ORIGINS").ok();
+    let mut origins = configured
+        .as_deref()
+        .map(parse_cors_origins)
+        .unwrap_or_else(default_cors_origins);
+    if origins.is_empty() {
+        origins = default_cors_origins();
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any)
+}
+
+fn parse_cors_origins(raw: &str) -> Vec<HeaderValue> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| HeaderValue::from_str(value).ok())
+        .collect()
+}
+
+fn default_cors_origins() -> Vec<HeaderValue> {
+    DEFAULT_CORS_ALLOWED_ORIGINS
+        .iter()
+        .filter_map(|value| HeaderValue::from_str(value).ok())
+        .collect()
 }
 
 async fn get_tasks_handler(State(state): State<ApiState>) -> Json<Vec<TaskResponse>> {
@@ -1713,6 +1753,72 @@ mod tests {
 
         assert!(parsed[0].get("task").is_some());
         assert!(parsed[0].get("task_id").is_none());
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_cors_simple_get_includes_allow_origin_for_local_dev() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks")
+                    .method("GET")
+                    .header("origin", "http://localhost:5173")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_cors_preflight_allows_local_dev_origin() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tasks")
+                    .method("OPTIONS")
+                    .header("origin", "http://localhost:5173")
+                    .header("access-control-request-method", "GET")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173")
+        );
+        let allow_methods = response
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        assert!(allow_methods.contains("GET"));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
