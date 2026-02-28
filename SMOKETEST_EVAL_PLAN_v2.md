@@ -1,0 +1,42 @@
+# TRACE Smoke + Eval Plan v2
+
+Date: 2026-02-28  
+Depends on: `AGENTS.md`, `BUILD_SEQUENCE_PLAN_v3.md`
+
+## Real-User Smoke Test Target
+From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace events on one shared server, and generate a benchmark report that can be reviewed in the same UI.
+
+## Target Flow (Web-Driven)
+1. Start/attach tmux session from web.
+2. Spawn configured lanes from web.
+3. Execute scripted lane runners (no manual terminal copy/paste).
+4. Emit typed write events:
+   - claim, run start, output, candidate, release
+5. Trigger benchmark evaluation.
+6. Retrieve and render report summary in web.
+
+## What Is Already Landed
+- CORS contract for browser-origin API access.
+- Backend tmux orchestration APIs (`start/status/add-lane/add-pane/stop`).
+- Web tmux orchestration controls wired to those APIs.
+- Benchmark generation endpoint (`POST /benchmarks/evaluate`) writing JSON/Markdown artifacts.
+
+## Confirmed Gaps
+- Lane execution is still manual in shell panes.
+- No smoke-run workflow endpoint coordinating lane lifecycle.
+- No report list/get API for UI retrieval.
+- No deterministic task pack + expected scoring contract.
+- No browser E2E suite verifying end-to-end smoke behavior.
+
+## Milestones
+1. M1: Scripted lane runner mode.
+2. M2: Smoke workflow API (trigger + status).
+3. M3: Report list/get endpoints.
+4. M4: Web report UX (summary + drill-down).
+5. M5: Playwright smoke tests + CI gate.
+
+## Acceptance Criteria
+- At least 3 lanes can run a web-triggered smoke flow against one server/root.
+- No missing or duplicate `global_seq` entries under concurrent lane writes.
+- Stale lease writes are rejected/disqualified with explicit reason.
+- UI can display benchmark report results without direct filesystem access.

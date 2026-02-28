@@ -3,13 +3,13 @@ TRACE is a *local-first* harness that binds agent work to tasks, records immutab
 
 ## Active Planning Docs
 - [AGENTS.md](/Users/artk/Documents/GitHub/TRACE/AGENTS.md)
-- [BUILD_SEQUENCE_PLAN_v2.md](/Users/artk/Documents/GitHub/TRACE/BUILD_SEQUENCE_PLAN_v2.md)
-- [SMOKETEST_EVAL_PLAN_v1.md](/Users/artk/Documents/GitHub/TRACE/SMOKETEST_EVAL_PLAN_v1.md)
-- [FRONTEND_PLAN_v4.md](/Users/artk/Documents/GitHub/TRACE/FRONTEND_PLAN_v4.md)
-- [FRONTEND_PLAN_v3.md](/Users/artk/Documents/GitHub/TRACE/FRONTEND_PLAN_v3.md)
+- [BUILD_SEQUENCE_PLAN_v3.md](/Users/artk/Documents/GitHub/TRACE/BUILD_SEQUENCE_PLAN_v3.md)
+- [SMOKETEST_EVAL_PLAN_v2.md](/Users/artk/Documents/GitHub/TRACE/SMOKETEST_EVAL_PLAN_v2.md)
+- [FRONTEND_PLAN_v5.md](/Users/artk/Documents/GitHub/TRACE/FRONTEND_PLAN_v5.md)
 
 ## Archived Planning Docs
 - [archive/phase0_docs](/Users/artk/Documents/GitHub/TRACE/archive/phase0_docs)
+- [archive/plan_refresh_2026-02-28/00_INDEX.md](/Users/artk/Documents/GitHub/TRACE/archive/plan_refresh_2026-02-28/00_INDEX.md)
 
 ## Workspace Layout
 - Rust workspace crates live in `/Users/artk/Documents/GitHub/TRACE/crates`.
