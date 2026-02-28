@@ -27,24 +27,25 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
 - tmux lane launch supports `mode=interactive|runner`.
 - Runner mode executes typed writes + `verdict.recorded` automatically.
 - Benchmark generation endpoint (`POST /benchmarks/evaluate`) writing JSON/Markdown artifacts.
+- Smoke workflow endpoints are active:
+  - `POST /smoke/runs`
+  - `GET /smoke/runs/{run_id}`
+  - preflights session/target and writes benchmark summary on completion
 
 ## Confirmed Gaps
-- No `POST /smoke/runs` / `GET /smoke/runs/{run_id}` job API yet.
 - No `GET /reports` / `GET /reports/{report_id}` API for UI retrieval.
+- Web UI has not yet wired smoke workflow trigger + polling.
 - No deterministic task pack + expected scoring contract.
 - No browser E2E suite verifying end-to-end smoke behavior.
 
 ## Milestones
-1. M1: Smoke workflow API.
-   - `POST /smoke/runs`
-   - `GET /smoke/runs/{run_id}`
-2. M2: Report retrieval APIs.
+1. M2: Report retrieval APIs.
    - `GET /reports`
    - `GET /reports/{report_id}`
-3. M3: Minimal web flow.
+2. M3: Minimal web flow.
    - Run smoke, poll status, view latest report.
-4. M4: Deterministic evaluator seed pack.
-5. M5: Playwright smoke tests + CI gate.
+3. M4: Deterministic evaluator seed pack.
+4. M5: Playwright smoke tests + CI gate.
 
 ## Acceptance Criteria
 - At least 3 lanes can run a web-triggered smoke flow against one server/root.

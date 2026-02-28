@@ -83,6 +83,8 @@ TRACE exposes a Codex auth status endpoint and enforces auth at lane-spawn time.
 - Policy env var:
   - `TRACE_CODEX_AUTH_POLICY=required|optional`
   - default is `required`
+- Smoke history cap:
+  - `TRACE_SMOKE_RUN_HISTORY_LIMIT` (default `200`)
 - Codex binary override:
   - `TRACE_CODEX_BIN=/path/to/codex`
 
@@ -138,6 +140,12 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/status \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke"}'
 
+RUN_ID="$(curl -sS -X POST http://127.0.0.1:18086/smoke/runs \
+  -H 'content-type: application/json' \
+  -d '{"session":"trace-web-smoke","target":"trace-web-smoke:lanes"}' | jq -r '.run_id')"
+
+curl -sS "http://127.0.0.1:18086/smoke/runs/$RUN_ID" | jq .
+
 curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/stop \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke"}'
@@ -147,17 +155,17 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/stop \
 - Monorepo scaffold is in place (Rust + TypeScript workspace).
 - Read-side API projections from canonical event log are implemented.
 - tmux orchestration routes are implemented in backend and wired into web UI controls.
-- Next milestone is a thin end-to-end smoke slice from one web action to one retrievable report.
+- Smoke workflow API is implemented:
+  - `POST /smoke/runs`
+  - `GET /smoke/runs/{run_id}`
+- Next milestone is report retrieval APIs plus web smoke trigger/poll/report UI wiring.
 
 ## Immediate Blocker-Removal Plan
-1. Add smoke workflow API:
-   - `POST /smoke/runs`
-   - `GET /smoke/runs/{run_id}`
-2. Add report retrieval API:
+1. Add report retrieval API:
    - `GET /reports`
    - `GET /reports/{report_id}`
-3. Wire minimal web smoke flow:
+2. Wire minimal web smoke flow:
    - `Run Smoke`, `Refresh Status`, `View Latest Report`
-4. Add deterministic seeded eval pack so scores are stable.
-5. Add one Playwright smoke test and gate CI on it.
-6. Add merge/PR output pipeline after smoke stability.
+3. Add deterministic seeded eval pack so scores are stable.
+4. Add one Playwright smoke test and gate CI on it.
+5. Add merge/PR output pipeline after smoke stability.

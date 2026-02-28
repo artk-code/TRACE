@@ -30,6 +30,8 @@ Commands:
       Attach to session.
   status
       Show windows and panes for the session.
+  validate-target <target>
+      Validate that a tmux target exists in the session.
   add-lane <lane_name> [profile] [mode]
       Add new lane window.
       mode: interactive | runner (default: interactive)
@@ -49,6 +51,7 @@ Examples:
   $0 --session trace-smoke attach
   $0 add-lane codex4 high
   $0 add-lane codex4 high runner
+  $0 validate-target trace-smoke:lanes
   $0 add-pane codex5 flash trace-smoke:lanes runner
   $0 wait-lane codex5 180
 EOF
@@ -267,6 +270,27 @@ status_session() {
   echo "TRACE_SERVER_ADDR=$(session_env_value TRACE_SERVER_ADDR || echo "<unset>")"
 }
 
+validate_target() {
+  require_tmux
+  if ! session_exists; then
+    echo "session '$SESSION' does not exist." >&2
+    exit 1
+  fi
+
+  local target="${1:-}"
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 [global opts] validate-target <target>" >&2
+    exit 2
+  fi
+
+  if ! tmux list-panes -t "$target" >/dev/null 2>&1; then
+    echo "target '$target' does not exist in session '$SESSION'" >&2
+    exit 1
+  fi
+
+  echo "target '$target' exists"
+}
+
 add_lane() {
   require_tmux
   if ! session_exists; then
@@ -407,6 +431,9 @@ case "$command" in
     ;;
   status)
     status_session
+    ;;
+  validate-target)
+    validate_target "$@"
     ;;
   add-lane)
     add_lane "$@"

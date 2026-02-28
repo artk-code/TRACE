@@ -23,26 +23,26 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
 8. Scripted lane runner mode is available:
    - tmux add-lane/add-pane accept `mode=interactive|runner`
    - runner mode emits claim/run/output/candidate/verdict/release automatically
+9. Smoke workflow API is implemented:
+   - `POST /smoke/runs`
+   - `GET /smoke/runs/{run_id}`
+   - preflights tmux session/target, scopes events by smoke lanes, writes benchmark report at completion
 
 ## Execution Sequence
-1. Smoke workflow API (thin vertical slice).
-   - Add `POST /smoke/runs` to trigger a full Flash/High/Extra smoke workflow.
-   - Add `GET /smoke/runs/{run_id}` to expose lifecycle state for polling.
-   - Include benchmark evaluate trigger and generated `report_id` in final run state.
-2. Report retrieval APIs.
+1. Report retrieval APIs.
    - Add `GET /reports` (latest-first report metadata).
    - Add `GET /reports/{report_id}` (report payload for UI rendering).
    - Keep report ID sanitization and root scoping safeguards.
-3. Minimal web smoke flow.
+2. Minimal web smoke flow.
    - Add `Run Smoke`, `Refresh Status`, `View Latest Report`.
    - Poll `GET /smoke/runs/{run_id}` until terminal status.
-4. Deterministic eval contract.
+3. Deterministic eval contract.
    - Add seeded task pack and expected-output checks.
    - Make benchmark quality outcome reproducible run-to-run.
-5. Browser E2E harness + CI gate.
+4. Browser E2E harness + CI gate.
    - Add one Playwright smoke validating auth check -> run smoke -> report visible.
    - Gate CI on that test plus existing Rust/web regressions.
-6. Merge/PR pipeline.
+5. Merge/PR pipeline.
    - Add winner/stacked-candidate export and Git-compatible PR workflow after smoke path stabilizes.
 
 ## Risks

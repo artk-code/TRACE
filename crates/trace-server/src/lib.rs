@@ -52,6 +52,7 @@ const DEFAULT_TMUX_SESSION: &str = "trace-smoke";
 const DEFAULT_TMUX_SCRIPT_PATH: &str = "scripts/trace-smoke-tmux.sh";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC: u64 = 180;
+const DEFAULT_SMOKE_RUN_HISTORY_LIMIT: usize = 200;
 const DEFAULT_SMOKE_PROFILES: [&str; 3] = ["flash", "high", "extra"];
 static SMOKE_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -517,6 +518,7 @@ struct ApiState {
     tmux_script_path: PathBuf,
     codex_bin_path: PathBuf,
     codex_auth_policy: CodexAuthPolicy,
+    smoke_run_history_limit: usize,
     smoke_runs: Arc<Mutex<HashMap<String, SmokeRunRecord>>>,
     active_smoke_sessions: Arc<Mutex<HashSet<String>>>,
 }
@@ -777,6 +779,7 @@ pub fn app_router(
     let tmux_script_path = resolve_tmux_script_path();
     let codex_bin_path = resolve_codex_bin_path();
     let codex_auth_policy = resolve_codex_auth_policy();
+    let smoke_run_history_limit = resolve_smoke_run_history_limit();
     app_router_with_tmux_script(
         api,
         event_store,
@@ -785,9 +788,11 @@ pub fn app_router(
         tmux_script_path,
         codex_bin_path,
         codex_auth_policy,
+        smoke_run_history_limit,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn app_router_with_tmux_script(
     api: TraceApi,
     event_store: EventStore,
@@ -796,6 +801,7 @@ fn app_router_with_tmux_script(
     tmux_script_path: PathBuf,
     codex_bin_path: PathBuf,
     codex_auth_policy: CodexAuthPolicy,
+    smoke_run_history_limit: usize,
 ) -> Router {
     let state = ApiState {
         api: Arc::new(RwLock::new(api)),
@@ -806,6 +812,7 @@ fn app_router_with_tmux_script(
         tmux_script_path,
         codex_bin_path,
         codex_auth_policy,
+        smoke_run_history_limit,
         smoke_runs: Arc::new(Mutex::new(HashMap::new())),
         active_smoke_sessions: Arc::new(Mutex::new(HashSet::new())),
     };
@@ -939,6 +946,19 @@ fn resolve_codex_auth_policy() -> CodexAuthPolicy {
     {
         Some("optional") => CodexAuthPolicy::Optional,
         _ => CodexAuthPolicy::Required,
+    }
+}
+
+fn resolve_smoke_run_history_limit() -> usize {
+    let configured = std::env::var("TRACE_SMOKE_RUN_HISTORY_LIMIT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<usize>().ok());
+
+    match configured {
+        Some(limit) if limit > 0 => limit,
+        _ => DEFAULT_SMOKE_RUN_HISTORY_LIMIT,
     }
 }
 
@@ -1285,6 +1305,71 @@ fn smoke_run_response(record: &SmokeRunRecord) -> SmokeRunResponse {
     }
 }
 
+fn prune_smoke_run_history(
+    runs: &mut HashMap<String, SmokeRunRecord>,
+    history_limit: usize,
+) -> usize {
+    let mut removed: usize = 0;
+    while runs.len() >= history_limit {
+        let removable = runs
+            .iter()
+            .filter(|(_, record)| {
+                matches!(
+                    record.status,
+                    SmokeRunStatus::Succeeded | SmokeRunStatus::Failed
+                )
+            })
+            .min_by(|(_, left), (_, right)| left.updated_at.cmp(&right.updated_at))
+            .map(|(run_id, _)| run_id.clone());
+
+        let Some(run_id) = removable else {
+            break;
+        };
+        runs.remove(&run_id);
+        removed = removed.saturating_add(1);
+    }
+    removed
+}
+
+fn event_is_scoped_to_smoke_run(
+    event: &TraceEvent,
+    start_global_seq: u64,
+    lane_names: &HashSet<String>,
+) -> bool {
+    if event.global_seq <= start_global_seq {
+        return false;
+    }
+
+    let worker = payload_string(
+        &event.payload,
+        &["worker_id", "holder", "claimed_by", "released_by"],
+    );
+    if worker
+        .as_ref()
+        .is_some_and(|value| lane_names.contains(value))
+    {
+        return true;
+    }
+
+    if let Some(run_id) = &event.run_id {
+        for lane in lane_names {
+            let run_prefix = format!("{lane}-run-");
+            if run_id.starts_with(&run_prefix) {
+                return true;
+            }
+        }
+    }
+
+    for lane in lane_names {
+        let task_marker = format!("-{lane}-");
+        if event.task_id.contains(&task_marker) {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn workflow_error_to_string(error: (StatusCode, Json<ApiErrorResponse>)) -> String {
     let (status, Json(body)) = error;
     format!("{} {}", status.as_u16(), body.error)
@@ -1357,6 +1442,7 @@ fn build_benchmark_response_from_events(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_smoke_workflow(
     state: ApiState,
     run_id: String,
@@ -1416,6 +1502,7 @@ async fn run_smoke_workflow(
     }
 
     set_smoke_run_running(&state, &run_id, "evaluating_benchmark").await;
+    let lane_name_set = lane_names.iter().cloned().collect::<HashSet<_>>();
     let report_response = (|| {
         let events = state
             .event_store
@@ -1423,7 +1510,7 @@ async fn run_smoke_workflow(
             .map_err(|error| internal_error(error.to_string()))?;
         let scoped_events = events
             .into_iter()
-            .filter(|event| event.global_seq > start_global_seq)
+            .filter(|event| event_is_scoped_to_smoke_run(event, start_global_seq, &lane_name_set))
             .collect::<Vec<_>>();
         let report_id = sanitize_report_id(
             report_id_override
@@ -1475,6 +1562,26 @@ async fn post_smoke_run_handler(
     validate_runner_timeout(runner_timeout_sec)?;
     enforce_codex_auth_for_lane_spawn(&state, "smoke-run").await?;
 
+    execute_tmux_script_result(
+        &state,
+        vec![
+            "--session".to_string(),
+            session.clone(),
+            "status".to_string(),
+        ],
+    )
+    .await?;
+    execute_tmux_script_result(
+        &state,
+        vec![
+            "--session".to_string(),
+            session.clone(),
+            "validate-target".to_string(),
+            target.clone(),
+        ],
+    )
+    .await?;
+
     {
         let mut active = state.active_smoke_sessions.lock().await;
         if active.contains(&session) {
@@ -1512,9 +1619,24 @@ async fn post_smoke_run_handler(
         benchmark: None,
     };
 
-    {
+    let history_limit_reached = {
         let mut runs = state.smoke_runs.lock().await;
-        runs.insert(run_id.clone(), record.clone());
+        prune_smoke_run_history(&mut runs, state.smoke_run_history_limit);
+        if runs.len() >= state.smoke_run_history_limit {
+            true
+        } else {
+            runs.insert(run_id.clone(), record.clone());
+            false
+        }
+    };
+
+    if history_limit_reached {
+        let mut active = state.active_smoke_sessions.lock().await;
+        active.remove(&session);
+        return Err(conflict_error(format!(
+            "smoke run history limit reached ({}); increase TRACE_SMOKE_RUN_HISTORY_LIMIT or wait for active runs to complete",
+            state.smoke_run_history_limit
+        )));
     }
 
     let workflow_state = state.clone();
@@ -2589,7 +2711,8 @@ mod tests {
     use trace_store::EventStore;
 
     use super::{
-        app_router_with_tmux_script, bootstrap_runtime, CodexAuthPolicy, TraceApi, PHASE0_ENDPOINTS,
+        app_router_with_tmux_script, bootstrap_runtime, CodexAuthPolicy, TraceApi,
+        DEFAULT_SMOKE_RUN_HISTORY_LIMIT, PHASE0_ENDPOINTS,
     };
 
     fn unique_temp_root() -> std::path::PathBuf {
@@ -2725,6 +2848,24 @@ mod tests {
         codex_bin_path: PathBuf,
         codex_auth_policy: CodexAuthPolicy,
     ) -> axum::Router {
+        build_test_app_with_orchestration_policy_and_history_limit(
+            root,
+            store,
+            tmux_script_path,
+            codex_bin_path,
+            codex_auth_policy,
+            DEFAULT_SMOKE_RUN_HISTORY_LIMIT,
+        )
+    }
+
+    fn build_test_app_with_orchestration_policy_and_history_limit(
+        root: &std::path::Path,
+        store: &EventStore,
+        tmux_script_path: PathBuf,
+        codex_bin_path: PathBuf,
+        codex_auth_policy: CodexAuthPolicy,
+        smoke_run_history_limit: usize,
+    ) -> axum::Router {
         let api = TraceApi::from_store(store).expect("projection should build");
         let lease_store = LeaseIndexStore::new(root).expect("lease store should initialize");
         let replay_store =
@@ -2748,6 +2889,7 @@ mod tests {
             tmux_script_path,
             codex_bin_path,
             codex_auth_policy,
+            smoke_run_history_limit,
         )
     }
 
@@ -3089,12 +3231,267 @@ mod tests {
         assert!(std::path::Path::new(markdown_report_path).exists());
 
         let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("status"));
+        assert!(logged_args.contains("validate-target trace-web-test:lanes"));
         assert!(logged_args.contains("add-pane smoke-flash-"));
         assert!(logged_args.contains("add-pane smoke-high-"));
         assert!(logged_args.contains("add-pane smoke-extra-"));
         assert!(logged_args.contains("wait-lane smoke-flash-"));
         assert!(logged_args.contains("wait-lane smoke-high-"));
         assert!(logged_args.contains("wait-lane smoke-extra-"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_smoke_run_rejects_when_tmux_session_preflight_fails() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let tmux_script_path = root.join("tmux-session-missing.sh");
+        write_executable_script(
+            &tmux_script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [[ \"${{3:-}}\" == \"status\" ]]; then\n  echo \"session missing\" >&2\n  exit 1\nfi\necho \"ok\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, tmux_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("status"));
+
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("status"));
+        assert!(!logged_args.contains("add-pane"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_smoke_run_rejects_when_tmux_target_preflight_fails() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let tmux_script_path = root.join("tmux-target-missing.sh");
+        write_executable_script(
+            &tmux_script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [[ \"${{3:-}}\" == \"validate-target\" ]]; then\n  echo \"target missing\" >&2\n  exit 1\nfi\necho \"ok\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, tmux_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "target": "trace-web-test:missing"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("validate-target"));
+
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("status"));
+        assert!(logged_args.contains("validate-target trace-web-test:missing"));
+        assert!(!logged_args.contains("add-pane"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_smoke_run_benchmark_scopes_out_unrelated_events_after_start() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let tmux_script_path = root.join("tmux-slow-wait.sh");
+        write_executable_script(
+            &tmux_script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${3:-}\" == \"wait-lane\" ]]; then\n  sleep 0.2\nfi\necho \"ok\"\n",
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, tmux_script_path);
+
+        let start_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(start_response.status(), axum::http::StatusCode::ACCEPTED);
+        let start_body = to_bytes(start_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let start_payload: Value =
+            serde_json::from_slice(&start_body).expect("response should parse");
+        let run_id = start_payload["run_id"]
+            .as_str()
+            .expect("run_id should be present")
+            .to_string();
+
+        append_event(
+            &store,
+            "TASK-NOISE",
+            Some("RUN-NOISE"),
+            EventKind::RunStarted,
+            json!({
+                "worker_id": "noise-worker",
+                "profile": "noise"
+            }),
+        );
+
+        let terminal = wait_for_smoke_run_terminal(&app, &run_id, Duration::from_secs(6)).await;
+        assert_eq!(terminal["status"].as_str(), Some("succeeded"));
+        assert_eq!(terminal["summary"]["total_events"].as_u64(), Some(0));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_smoke_run_history_limit_prunes_old_terminal_runs() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let tmux_script_path = root.join("tmux-ok.sh");
+        write_executable_script(
+            &tmux_script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"ok\"\n",
+        );
+        let app = build_test_app_with_orchestration_policy_and_history_limit(
+            &root,
+            &store,
+            tmux_script_path,
+            write_logged_in_codex_script(&root),
+            CodexAuthPolicy::Required,
+            1,
+        );
+
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test-1"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(first_response.status(), axum::http::StatusCode::ACCEPTED);
+        let first_body = to_bytes(first_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let first_payload: Value =
+            serde_json::from_slice(&first_body).expect("response should parse");
+        let first_run_id = first_payload["run_id"]
+            .as_str()
+            .expect("first run id should exist")
+            .to_string();
+        let first_terminal =
+            wait_for_smoke_run_terminal(&app, &first_run_id, Duration::from_secs(5)).await;
+        assert_eq!(first_terminal["status"].as_str(), Some("succeeded"));
+
+        let second_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test-2"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(second_response.status(), axum::http::StatusCode::ACCEPTED);
+        let second_body = to_bytes(second_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let second_payload: Value =
+            serde_json::from_slice(&second_body).expect("response should parse");
+        let second_run_id = second_payload["run_id"]
+            .as_str()
+            .expect("second run id should exist")
+            .to_string();
+        let second_terminal =
+            wait_for_smoke_run_terminal(&app, &second_run_id, Duration::from_secs(5)).await;
+        assert_eq!(second_terminal["status"].as_str(), Some("succeeded"));
+
+        let first_get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/smoke/runs/{first_run_id}"))
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(first_get.status(), axum::http::StatusCode::NOT_FOUND);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

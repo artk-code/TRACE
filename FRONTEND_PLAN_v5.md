@@ -15,6 +15,9 @@ Move from read-focused UI to browser-driven smoke orchestration and benchmark re
 - UI gating follows backend policy:
   - `policy=required` blocks lane spawn when unauthenticated
   - `policy=optional` allows lane spawn
+- Backend smoke workflow API is available for UI integration:
+  - `POST /smoke/runs`
+  - `GET /smoke/runs/{run_id}`
 
 ## Phase Sequence
 1. Phase A: Workflow trigger + status polling.

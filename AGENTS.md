@@ -31,16 +31,22 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - `GET /orchestrator/auth/codex/status`
 - Backend tmux orchestration endpoints exist:
   - `POST /orchestrator/tmux/start|status|add-lane|add-pane|stop`
+- Backend smoke workflow endpoints exist:
+  - `POST /smoke/runs`
+  - `GET /smoke/runs/{run_id}`
+  - workflow preflights tmux session+target and writes benchmark report on completion
 - Backend lane-spawn auth enforcement exists:
   - `TRACE_CODEX_AUTH_POLICY=required|optional` (default: `required`)
   - `add-lane`/`add-pane` are blocked when auth is required and Codex is not logged in
+- Smoke run history is bounded:
+  - `TRACE_SMOKE_RUN_HISTORY_LIMIT` (default: `200`)
 - Web UI can call tmux orchestration endpoints and display command results/errors.
 
 ## Smoketest Readiness (2026-02-28)
 - Shared-server ingest safety (lock + lease fencing): **82%**
-- Model-vs-model trace capture/report generation: **74%**
+- Model-vs-model trace capture/report generation: **78%**
 - Web-driven orchestration control surface: **72%**
-- Browser-driven smoke + report UX: **53%**
+- Browser-driven smoke + report UX: **56%**
 - Deterministic evaluator/scoring: **20%**
 - Merge + PR-capable output pipeline: **15%**
 
@@ -49,6 +55,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Typed claim/run/output/candidate/release paths are active and fenced.
 - tmux orchestration routes are active and validated for basic inputs.
 - tmux add-lane/add-pane are auth-gated server-side when `TRACE_CODEX_AUTH_POLICY=required`.
+- Smoke workflow API coordinates multi-lane runner launch, wait, and benchmark writeback.
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop and auth preflight status.
 - Lane shells support two execution modes:
   - `interactive` (manual copy/paste flow)
@@ -56,10 +63,9 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Benchmark report generation writes JSON+Markdown artifacts with sanitized report IDs.
 
 ## Known Gaps Blocking "Super Smoketest"
-- Runner mode is not coordinated by a single smoke workflow yet:
-  - lane runners can be launched, but no backend job orchestrates full multi-lane lifecycle/status.
-- No smoke workflow endpoint coordinating scripted Flash/High/Extra runs.
+- Browser UI does not yet drive `POST /smoke/runs` / `GET /smoke/runs/{run_id}`.
 - No report list/get API for browser retrieval; reports are filesystem artifacts only.
+- Smoke workflow currently requires an existing tmux session and valid target (`session` + `target` preflight).
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
 - No seeded deterministic task/eval pack with expected-output contract.
 - No browser E2E harness (Playwright) gating orchestration/report flows.
@@ -67,31 +73,27 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Thin vertical slice (backend smoke run workflow).
-  - Add `POST /smoke/runs` and `GET /smoke/runs/{run_id}`.
-  - Coordinate multi-lane runner lifecycle + benchmark evaluate in one run object.
-2. Report retrieval APIs.
+1. Report retrieval APIs.
   - Add `GET /reports` and `GET /reports/{report_id}` rooted under `.trace/reports`.
   - Keep report ID sanitization/root scoping safeguards.
-3. Minimal web smoke flow.
+2. Minimal web smoke flow.
   - Add `Run Smoke`, `Refresh Status`, `View Latest Report` UI flow.
   - Poll smoke run status and render summary from report APIs.
-4. Deterministic eval contract.
+3. Deterministic eval contract.
   - Add seeded task pack + expected-output scoring contract.
   - Make benchmark quality signals reproducible across reruns.
-5. Browser E2E + CI gate.
+4. Browser E2E + CI gate.
   - Add Playwright smoke covering auth check, smoke run, report visibility.
   - Gate CI on this test.
-6. Merge/PR pipeline (after smoke stability).
+5. Merge/PR pipeline (after smoke stability).
   - Add winning/stacked candidate export and Git-compatible PR path.
 
 ## Immediate Build Sequence
-1. Implement `POST /smoke/runs` + `GET /smoke/runs/{run_id}`.
-2. Implement `GET /reports` + `GET /reports/{report_id}`.
-3. Wire web controls for run/poll/view report.
-4. Add deterministic seeded eval pack.
-5. Add one stable Playwright smoke and CI gate.
-6. Add merge/PR workflow after smoke is reliable.
+1. Implement `GET /reports` + `GET /reports/{report_id}`.
+2. Wire web controls for run/poll/view report.
+3. Add deterministic seeded eval pack.
+4. Add one stable Playwright smoke and CI gate.
+5. Add merge/PR workflow after smoke is reliable.
 
 ## Tmux Orchestration Runbook (Now)
 Prerequisite:
@@ -119,7 +121,9 @@ Prerequisite:
   - `TRACE_RUNNER_EXIT_AFTER_RUN=1`
 7. Check status:
   - `scripts/trace-smoke-tmux.sh status`
-8. Stop:
+8. Validate target (before smoke workflow triggers):
+  - `scripts/trace-smoke-tmux.sh validate-target trace-smoke:lanes`
+9. Stop:
   - `scripts/trace-smoke-tmux.sh stop`
 
 ## Tmux Bug Ledger (Current)
@@ -128,6 +132,9 @@ Prerequisite:
 - Fixed: server pane startup falls back to `cargo run -p trace-server` when `rustup stable` fails/unavailable.
 - Fixed: lane runner mode (`mode=runner`) now emits typed write events plus `verdict.recorded` without manual copy/paste.
 - Fixed: `wait-lane` now matches pane metadata (`@trace_lane_name`) with robust delimiter parsing; smoke runner lanes no longer false-timeout.
+- Fixed: smoke workflow preflights tmux session/target before enqueue, failing fast instead of failing later in runner spawn.
+- Fixed: smoke benchmark event scoping now filters by lane identity, preventing unrelated events from contaminating reports.
+- Fixed: smoke run in-memory history is bounded with pruning (`TRACE_SMOKE_RUN_HISTORY_LIMIT`).
 - Open: pane command injection can race if commands are blasted without pacing.
 - Open: no autonomous lane lifecycle manager yet.
 
@@ -165,6 +172,10 @@ Prerequisite:
 - `test_codex_auth_status_reports_missing_binary`
 - `test_tmux_add_pane_rejects_invalid_mode`
 - `test_tmux_status_maps_script_exit_code_one_to_conflict`
+- `test_smoke_run_rejects_when_tmux_session_preflight_fails`
+- `test_smoke_run_rejects_when_tmux_target_preflight_fails`
+- `test_smoke_run_benchmark_scopes_out_unrelated_events_after_start`
+- `test_smoke_run_history_limit_prunes_old_terminal_runs`
 - `web/src/guards.test.ts` runtime schema guard coverage
 
 ## Exit Criteria
