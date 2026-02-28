@@ -1,56 +1,46 @@
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 
-import type { CandidateSummary, OutputChunk, TaskResponse } from "./contracts";
+import { fetchCandidates, fetchRunOutput, fetchTasks } from "./api";
 import { decodeOutputChunk, filterCandidates } from "./guards";
-
-const initialTasks: TaskResponse[] = [
-  {
-    task: { task_id: "TASK-42", title: "Improve lease replay", owner: "platform" },
-    status: "Claimed",
-    status_detail: { lease_epoch: 7, holder: "agent-3" },
-  },
-];
-
-const initialCandidates: CandidateSummary[] = [
-  {
-    candidate_id: "C-100",
-    task_id: "TASK-42",
-    run_id: "RUN-13",
-    lease_epoch: 7,
-    eligible: true,
-  },
-  {
-    candidate_id: "C-099",
-    task_id: "TASK-42",
-    run_id: "RUN-12",
-    lease_epoch: 6,
-    eligible: false,
-    disqualified_reason: "stale_epoch",
-  },
-];
-
-const initialOutput: OutputChunk[] = [
-  {
-    stream: "stdout",
-    encoding: "utf8",
-    chunk: "hello from RUN-13",
-    chunk_index: 0,
-    final: true,
-  },
-];
 
 export default function App() {
   const [includeDisqualified, setIncludeDisqualified] = useState(false);
 
+  const tasksQuery = useQuery({
+    queryKey: ["tasks"],
+    queryFn: fetchTasks,
+  });
+
+  const primaryTask = tasksQuery.data?.[0] ?? null;
+  const taskId = primaryTask?.task.task_id;
+
+  const candidatesQuery = useQuery({
+    queryKey: ["candidates", taskId, includeDisqualified],
+    queryFn: () => fetchCandidates(taskId as string, includeDisqualified),
+    enabled: Boolean(taskId),
+  });
+
   const visibleCandidates = useMemo(
-    () => filterCandidates(initialCandidates, includeDisqualified),
-    [includeDisqualified],
+    () => filterCandidates(candidatesQuery.data ?? [], includeDisqualified),
+    [candidatesQuery.data, includeDisqualified],
   );
 
-  const outputText = useMemo(
-    () => initialOutput.map((chunk) => decodeOutputChunk(chunk)).join("\n"),
-    [],
-  );
+  const runId = visibleCandidates[0]?.run_id;
+
+  const outputQuery = useQuery({
+    queryKey: ["output", runId],
+    queryFn: () => fetchRunOutput(runId as string),
+    enabled: Boolean(runId),
+  });
+
+  const outputText = useMemo(() => {
+    if (!outputQuery.data) {
+      return "";
+    }
+
+    return outputQuery.data.map((chunk) => decodeOutputChunk(chunk)).join("\n");
+  }, [outputQuery.data]);
 
   return (
     <main style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", padding: 20 }}>
@@ -58,8 +48,10 @@ export default function App() {
 
       <section>
         <h2>Tasks</h2>
+        {tasksQuery.isLoading ? <p>Loading tasks...</p> : null}
+        {tasksQuery.error ? <p>Task fetch failed: {(tasksQuery.error as Error).message}</p> : null}
         <ul>
-          {initialTasks.map((task) => (
+          {(tasksQuery.data ?? []).map((task) => (
             <li key={task.task.task_id}>
               {task.task.task_id} | {task.status} | {task.task.title}
             </li>
@@ -77,6 +69,10 @@ export default function App() {
           />
           Show stale/disqualified
         </label>
+        {candidatesQuery.isLoading ? <p>Loading candidates...</p> : null}
+        {candidatesQuery.error ? (
+          <p>Candidate fetch failed: {(candidatesQuery.error as Error).message}</p>
+        ) : null}
         <ul>
           {visibleCandidates.map((candidate) => (
             <li key={candidate.candidate_id}>
@@ -89,6 +85,8 @@ export default function App() {
 
       <section>
         <h2>Run Output</h2>
+        {outputQuery.isLoading ? <p>Loading output...</p> : null}
+        {outputQuery.error ? <p>Output fetch failed: {(outputQuery.error as Error).message}</p> : null}
         <pre>{outputText}</pre>
       </section>
     </main>

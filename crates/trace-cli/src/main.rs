@@ -12,7 +12,10 @@ fn main() {
     match command.as_str() {
         "tasks" => {
             for task in api.get_tasks() {
-                println!("{}\t{:?}\t{}", task.task.task_id, task.status, task.task.title);
+                println!(
+                    "{}\t{:?}\t{}",
+                    task.task.task_id, task.status, task.task.title
+                );
             }
         }
         "task" => {

@@ -38,9 +38,7 @@ pub fn filter_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        classify_candidate, filter_candidates, DISQUALIFIED_REASON_STALE_EPOCH,
-    };
+    use super::{classify_candidate, filter_candidates, DISQUALIFIED_REASON_STALE_EPOCH};
 
     #[test]
     fn test_stale_epoch_candidate_marked_disqualified() {

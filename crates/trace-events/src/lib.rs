@@ -1,83 +1,61 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputEncoding {
     Utf8,
     Base64,
 }
 
-impl OutputEncoding {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Utf8 => "utf8",
-            Self::Base64 => "base64",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputStream {
     Stdout,
     Stderr,
 }
 
-impl OutputStream {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunnerOutputPayload {
     pub stream: OutputStream,
     pub encoding: OutputEncoding,
     pub chunk: String,
     pub chunk_index: u64,
+    #[serde(rename = "final", default)]
     pub final_chunk: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
+    #[serde(rename = "task.claimed")]
     TaskClaimed,
+    #[serde(rename = "task.renewed")]
     TaskRenewed,
+    #[serde(rename = "task.released")]
     TaskReleased,
+    #[serde(rename = "verdict.recorded")]
     VerdictRecorded,
+    #[serde(rename = "run.started")]
     RunStarted,
+    #[serde(rename = "runner.output")]
     RunnerOutput,
+    #[serde(rename = "changeset.created")]
     ChangesetCreated,
+    #[serde(untagged)]
     Unknown(String),
 }
 
-impl EventKind {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::TaskClaimed => "task.claimed",
-            Self::TaskRenewed => "task.renewed",
-            Self::TaskReleased => "task.released",
-            Self::VerdictRecorded => "verdict.recorded",
-            Self::RunStarted => "run.started",
-            Self::RunnerOutput => "runner.output",
-            Self::ChangesetCreated => "changeset.created",
-            Self::Unknown(value) => value.as_str(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EventPayload {
-    RunnerOutput(RunnerOutputPayload),
-    RawObject(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NewTraceEvent {
     pub global_seq: Option<u64>,
     pub ts: String,
     pub task_id: String,
     pub run_id: Option<String>,
     pub kind: EventKind,
-    pub payload: EventPayload,
+    pub payload: Value,
 }
 
 impl NewTraceEvent {
@@ -93,85 +71,54 @@ impl NewTraceEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraceEvent {
     pub global_seq: u64,
     pub ts: String,
     pub task_id: String,
     pub run_id: Option<String>,
     pub kind: EventKind,
-    pub payload: EventPayload,
+    pub payload: Value,
 }
 
 impl TraceEvent {
-    pub fn to_json_line(&self) -> String {
-        let run_id = self
-            .run_id
-            .as_ref()
-            .map(|value| format!("\"{}\"", escape_json(value)))
-            .unwrap_or_else(|| "null".to_string());
-
-        let payload = match &self.payload {
-            EventPayload::RunnerOutput(output) => format!(
-                "{{\"stream\":\"{}\",\"encoding\":\"{}\",\"chunk\":\"{}\",\"chunk_index\":{},\"final\":{}}}",
-                output.stream.as_str(),
-                output.encoding.as_str(),
-                escape_json(&output.chunk),
-                output.chunk_index,
-                output.final_chunk,
-            ),
-            EventPayload::RawObject(raw) => raw.clone(),
-        };
-
-        format!(
-            "{{\"global_seq\":{},\"ts\":\"{}\",\"task_id\":\"{}\",\"run_id\":{},\"kind\":\"{}\",\"payload\":{}}}",
-            self.global_seq,
-            escape_json(&self.ts),
-            escape_json(&self.task_id),
-            run_id,
-            self.kind.as_str(),
-            payload,
-        )
-    }
-}
-
-pub fn validate_runner_output_payload_json(raw_json: &str) -> Result<(), &'static str> {
-    if !raw_json.contains("\"stream\"") {
-        return Err("runner.output missing stream");
-    }
-    if !raw_json.contains("\"encoding\"") {
-        return Err("runner.output missing encoding");
-    }
-    if !raw_json.contains("\"chunk\"") {
-        return Err("runner.output missing chunk");
-    }
-    if !raw_json.contains("\"chunk_index\"") {
-        return Err("runner.output missing chunk_index");
+    pub fn to_json_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
     }
 
-    Ok(())
-}
+    pub fn from_json_line(line: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(line)
+    }
 
-fn escape_json(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            other => escaped.push(other),
+    pub fn validate(&self) -> Result<(), EventValidationError> {
+        if self.kind == EventKind::RunnerOutput {
+            validate_runner_output_payload(&self.payload)?;
         }
+
+        Ok(())
     }
-    escaped
+}
+
+#[derive(Debug, Error)]
+pub enum EventValidationError {
+    #[error("runner.output payload invalid: {0}")]
+    InvalidRunnerOutput(#[from] serde_json::Error),
+}
+
+pub fn validate_runner_output_payload(
+    payload: &Value,
+) -> Result<RunnerOutputPayload, EventValidationError> {
+    serde_json::from_value(payload.clone()).map_err(EventValidationError::from)
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{
-        EventKind, EventPayload, NewTraceEvent, OutputEncoding, OutputStream, RunnerOutputPayload,
-        validate_runner_output_payload_json,
+        validate_runner_output_payload, EventKind, NewTraceEvent, OutputEncoding, OutputStream,
+        RunnerOutputPayload,
     };
 
     #[test]
@@ -182,7 +129,7 @@ mod tests {
             task_id: "TASK-42".to_string(),
             run_id: Some("RUN-13".to_string()),
             kind: EventKind::RunStarted,
-            payload: EventPayload::RawObject("{}".to_string()),
+            payload: json!({}),
         };
 
         assert_eq!(event.global_seq, None);
@@ -196,7 +143,7 @@ mod tests {
             task_id: "TASK-42".to_string(),
             run_id: Some("RUN-13".to_string()),
             kind: EventKind::RunStarted,
-            payload: EventPayload::RawObject("{}".to_string()),
+            payload: json!({}),
         };
 
         let persisted = event.persist_with_global_seq(1842);
@@ -205,8 +152,13 @@ mod tests {
 
     #[test]
     fn test_runner_output_requires_encoding_field() {
-        let raw_json = "{\"stream\":\"stdout\",\"chunk\":\"abc\",\"chunk_index\":1}";
-        let result = validate_runner_output_payload_json(raw_json);
+        let payload = json!({
+            "stream": "stdout",
+            "chunk": "abc",
+            "chunk_index": 1
+        });
+
+        let result = validate_runner_output_payload(&payload);
         assert!(result.is_err());
     }
 
@@ -220,16 +172,8 @@ mod tests {
             final_chunk: true,
         };
 
-        let raw_json = format!(
-            "{{\"stream\":\"{}\",\"encoding\":\"{}\",\"chunk\":\"{}\",\"chunk_index\":{},\"final\":{}}}",
-            payload.stream.as_str(),
-            payload.encoding.as_str(),
-            payload.chunk,
-            payload.chunk_index,
-            payload.final_chunk,
-        );
-
-        let result = validate_runner_output_payload_json(&raw_json);
+        let value = serde_json::to_value(payload).expect("payload should serialize");
+        let result = validate_runner_output_payload(&value);
         assert!(result.is_ok());
     }
 }

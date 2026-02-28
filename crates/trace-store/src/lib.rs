@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use trace_events::{NewTraceEvent, TraceEvent};
@@ -36,19 +36,43 @@ impl EventStore {
 
         let next_seq = self.next_sequence()?;
         let persisted = event.persist_with_global_seq(next_seq);
+        persisted
+            .validate()
+            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+
+        let serialized = persisted
+            .to_json_line()
+            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
 
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.canonical_log_path)?;
 
-        writeln!(file, "{}", persisted.to_json_line())?;
+        writeln!(file, "{serialized}")?;
 
         Ok(persisted)
     }
 
     pub fn tip_global_seq(&self) -> io::Result<u64> {
         self.current_max_sequence()
+    }
+
+    pub fn read_all_events(&self) -> io::Result<Vec<TraceEvent>> {
+        if !self.canonical_log_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(&self.canonical_log_path)?;
+        let mut events = Vec::new();
+
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            let event = TraceEvent::from_json_line(line)
+                .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+            events.push(event);
+        }
+
+        Ok(events)
     }
 
     fn next_sequence(&self) -> io::Result<u64> {
@@ -61,14 +85,10 @@ impl EventStore {
             return Ok(0);
         }
 
-        let content = fs::read_to_string(&self.canonical_log_path)?;
         let mut max_seq = 0u64;
-
-        for line in content.lines() {
-            if let Some(seq) = extract_global_seq(line) {
-                if seq > max_seq {
-                    max_seq = seq;
-                }
+        for event in self.read_all_events()? {
+            if event.global_seq > max_seq {
+                max_seq = event.global_seq;
             }
         }
 
@@ -76,31 +96,16 @@ impl EventStore {
     }
 }
 
-pub fn extract_global_seq(line: &str) -> Option<u64> {
-    let needle = "\"global_seq\":";
-    let start = line.find(needle)? + needle.len();
-
-    let digits: String = line[start..]
-        .chars()
-        .skip_while(|ch| ch.is_ascii_whitespace())
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect();
-
-    if digits.is_empty() {
-        return None;
-    }
-
-    digits.parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::env;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use trace_events::{EventKind, EventPayload, NewTraceEvent};
+    use serde_json::json;
+    use trace_events::{EventKind, NewTraceEvent};
 
-    use super::{CANONICAL_EVENT_LOG_PATH, EventStore};
+    use super::{EventStore, CANONICAL_EVENT_LOG_PATH};
 
     fn new_event(task_id: &str) -> NewTraceEvent {
         NewTraceEvent {
@@ -109,16 +114,18 @@ mod tests {
             task_id: task_id.to_string(),
             run_id: Some("RUN-13".to_string()),
             kind: EventKind::RunStarted,
-            payload: EventPayload::RawObject("{}".to_string()),
+            payload: json!({}),
         }
     }
 
     fn unique_temp_root() -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock should be monotonic for test")
             .as_nanos();
-        env::temp_dir().join(format!("trace-store-test-{nanos}"))
+        let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!("trace-store-test-{nanos}-{serial}"))
     }
 
     #[test]

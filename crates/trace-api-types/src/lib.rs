@@ -1,11 +1,16 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Task {
     pub task_id: String,
     pub title: String,
     pub owner: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     Unclaimed,
     Claimed,
@@ -15,21 +20,24 @@ pub enum TaskStatus {
     Done,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatusDetail {
     pub lease_epoch: Option<u64>,
     pub holder: Option<String>,
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskResponse {
     pub task: Task,
     pub status: TaskStatus,
     pub status_detail: Option<StatusDetail>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineEvent {
     pub kind: String,
     pub ts: String,
@@ -37,7 +45,8 @@ pub struct TimelineEvent {
     pub run_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CandidateSummary {
     pub candidate_id: String,
     pub task_id: String,
@@ -47,42 +56,45 @@ pub struct CandidateSummary {
     pub disqualified_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputEncoding {
     Utf8,
     Base64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunOutputChunk {
     pub stream: String,
     pub encoding: OutputEncoding,
     pub chunk: String,
     pub chunk_index: u64,
+    #[serde(rename = "final", default)]
     pub final_chunk: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputDecodeError {
-    ExceedsSizeLimit { limit_bytes: usize, attempted_bytes: usize },
+    ExceedsSizeLimit {
+        limit_bytes: usize,
+        attempted_bytes: usize,
+    },
     InvalidBase64,
     InvalidUtf8,
 }
 
 pub fn validate_task_response_shape(raw_json: &str) -> Result<(), String> {
-    if !raw_json.contains("\"status\"") {
-        return Err("missing required field: status".to_string());
-    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw_json).map_err(|error| error.to_string())?;
 
-    if !raw_json.contains("\"task\"") {
-        return Err("missing required nested object: task".to_string());
-    }
-
-    if raw_json.contains("\"task_id\"") && !raw_json.contains("\"task\":") {
+    if parsed.get("task_id").is_some() {
         return Err("flat task_id is not allowed at top level".to_string());
     }
 
-    Ok(())
+    serde_json::from_value::<TaskResponse>(parsed)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 pub fn decode_output_chunk(
@@ -91,16 +103,19 @@ pub fn decode_output_chunk(
 ) -> Result<String, OutputDecodeError> {
     match chunk.encoding {
         OutputEncoding::Utf8 => {
-            if chunk.chunk.len() > max_bytes {
+            let byte_len = chunk.chunk.as_bytes().len();
+            if byte_len > max_bytes {
                 return Err(OutputDecodeError::ExceedsSizeLimit {
                     limit_bytes: max_bytes,
-                    attempted_bytes: chunk.chunk.len(),
+                    attempted_bytes: byte_len,
                 });
             }
             Ok(chunk.chunk.clone())
         }
         OutputEncoding::Base64 => {
-            let bytes = decode_base64(chunk.chunk.as_bytes())?;
+            let bytes = BASE64_STANDARD
+                .decode(chunk.chunk.as_bytes())
+                .map_err(|_| OutputDecodeError::InvalidBase64)?;
             if bytes.len() > max_bytes {
                 return Err(OutputDecodeError::ExceedsSizeLimit {
                     limit_bytes: max_bytes,
@@ -113,42 +128,6 @@ pub fn decode_output_chunk(
     }
 }
 
-fn decode_base64(input: &[u8]) -> Result<Vec<u8>, OutputDecodeError> {
-    let mut output = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buffer: u32 = 0;
-    let mut bits_in_buffer: u8 = 0;
-
-    for byte in input.iter().copied() {
-        if byte == b'=' {
-            break;
-        }
-
-        let value = base64_value(byte).ok_or(OutputDecodeError::InvalidBase64)? as u32;
-
-        buffer = (buffer << 6) | value;
-        bits_in_buffer += 6;
-
-        while bits_in_buffer >= 8 {
-            bits_in_buffer -= 8;
-            let out = ((buffer >> bits_in_buffer) & 0xFF) as u8;
-            output.push(out);
-        }
-    }
-
-    Ok(output)
-}
-
-fn base64_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'A'..=b'Z' => Some(byte - b'A'),
-        b'a'..=b'z' => Some(byte - b'a' + 26),
-        b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -158,8 +137,7 @@ mod tests {
 
     #[test]
     fn test_task_response_accepts_nested_shape() {
-        let payload =
-            "{\"task\":{\"task_id\":\"TASK-42\",\"title\":\"x\"},\"status\":\"Claimed\"}";
+        let payload = "{\"task\":{\"task_id\":\"TASK-42\",\"title\":\"x\"},\"status\":\"Claimed\"}";
         assert!(validate_task_response_shape(payload).is_ok());
     }
 

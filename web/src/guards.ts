@@ -1,41 +1,43 @@
-import type { CandidateSummary, OutputChunk, TaskResponse } from "./contracts";
+import {
+  candidateSummarySchema,
+  outputChunkSchema,
+  taskResponseSchema,
+  timelineEventSchema,
+  type CandidateSummary,
+  type OutputChunk,
+  type TaskResponse,
+  type TimelineEvent,
+} from "./contracts";
 
 declare const Buffer:
   | {
-      from: (value: string, encoding: string) => { toString: (encoding: string) => string };
+      from: (value: string, encoding: string) => { toString: (encoding: string) => string; length: number };
     }
   | undefined;
 
+const taskListSchema = taskResponseSchema.array();
+const timelineListSchema = timelineEventSchema.array();
+const candidateListSchema = candidateSummarySchema.array();
+const outputListSchema = outputChunkSchema.array();
+
 export function parseTaskResponse(raw: unknown): TaskResponse {
-  if (!isRecord(raw)) {
-    throw new Error("TaskResponse must be an object");
-  }
-
-  if (!isRecord(raw.task)) {
-    throw new Error("TaskResponse.task must be an object");
-  }
-
-  if (typeof raw.task.task_id !== "string") {
-    throw new Error("TaskResponse.task.task_id must be a string");
-  }
-
-  if (typeof raw.task.title !== "string") {
-    throw new Error("TaskResponse.task.title must be a string");
-  }
-
-  if (typeof raw.status !== "string") {
-    throw new Error("TaskResponse.status must be a string");
-  }
-
-  return raw as TaskResponse;
+  return taskResponseSchema.parse(raw);
 }
 
 export function parseTaskList(raw: unknown): TaskResponse[] {
-  if (!Array.isArray(raw)) {
-    throw new Error("Task list response must be an array");
-  }
+  return taskListSchema.parse(raw);
+}
 
-  return raw.map(parseTaskResponse);
+export function parseTimeline(raw: unknown): TimelineEvent[] {
+  return timelineListSchema.parse(raw);
+}
+
+export function parseCandidates(raw: unknown): CandidateSummary[] {
+  return candidateListSchema.parse(raw);
+}
+
+export function parseOutput(raw: unknown): OutputChunk[] {
+  return outputListSchema.parse(raw);
 }
 
 export function filterCandidates(
@@ -51,31 +53,45 @@ export function filterCandidates(
 
 export function decodeOutputChunk(chunk: OutputChunk, maxBytes = 64 * 1024): string {
   if (chunk.encoding === "utf8") {
-    if (chunk.chunk.length > maxBytes) {
+    const byteLength = utf8ByteLength(chunk.chunk);
+    if (byteLength > maxBytes) {
       throw new Error(`utf8 chunk exceeded limit (${maxBytes} bytes)`);
     }
     return chunk.chunk;
   }
 
   const decoded = base64ToText(chunk.chunk);
-  if (decoded.length > maxBytes) {
+  if (decoded.byteLength > maxBytes) {
     throw new Error(`base64 decoded payload exceeded limit (${maxBytes} bytes)`);
   }
-  return decoded;
+
+  return decoded.text;
 }
 
-function base64ToText(value: string): string {
-  if (typeof atob === "function") {
-    return atob(value);
+function base64ToText(value: string): { text: string; byteLength: number } {
+  if (typeof Buffer !== "undefined") {
+    const bytes = Buffer.from(value, "base64");
+    return { text: bytes.toString("utf8"), byteLength: bytes.length };
   }
 
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(value, "base64").toString("utf8");
+  if (typeof atob === "function") {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    const text = new TextDecoder().decode(bytes);
+    return { text, byteLength: bytes.length };
   }
 
   throw new Error("No base64 decoder available in this runtime");
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null;
+function utf8ByteLength(value: string): number {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(value).length;
+  }
+
+  return value.length;
 }
