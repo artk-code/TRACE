@@ -14,26 +14,26 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
 4. Core write-path fencing is in place:
    - lock-safe event append
    - lease epoch/holder validation for typed write routes
+5. Scripted lane runner mode is available:
+   - tmux add-lane/add-pane accept `mode=interactive|runner`
+   - runner mode emits claim/run/output/candidate/verdict/release automatically
 
 ## Execution Sequence
-1. Scripted lane runner (non-interactive).
-   - Add runner mode for lanes so they can execute claim/run/output/candidate/release without copy/paste.
-   - Keep existing interactive lane shell for human debugging.
-2. Smoke workflow endpoint.
+1. Smoke workflow endpoint.
    - Add API workflow to launch/coordinate Flash/High/Extra runner lanes for a predefined task pack.
    - Return workflow/job state for UI polling.
-3. Benchmark report retrieval APIs.
+2. Benchmark report retrieval APIs.
    - Add list/get endpoints for report artifacts under `.trace/reports`.
    - Keep report ID sanitization and root scoping safeguards.
-4. Web smoke dashboard.
+3. Web smoke dashboard.
    - Add "Run Smoke" + "Evaluate" controls.
    - Render report summary table (per model pass/fail, durations, stale/disqualified counts).
-5. Browser E2E harness.
+4. Browser E2E harness.
    - Add Playwright smoke that verifies:
      - tmux start/status from UI
      - smoke run triggers event writes
      - benchmark report appears in UI
-6. CI gate.
+5. CI gate.
    - Run Rust + web regression + Playwright smoke.
    - Fail build on smoke regression.
 

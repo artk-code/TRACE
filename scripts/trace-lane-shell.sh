@@ -2,8 +2,9 @@
 set -euo pipefail
 
 if [[ $# -lt 6 ]]; then
-  echo "usage: $0 <lane_id> <profile> <repo_root> <trace_root> <trace_server_addr> <role>" >&2
+  echo "usage: $0 <lane_id> <profile> <repo_root> <trace_root> <trace_server_addr> <role> [lane_mode]" >&2
   echo "roles: lane | observer | server" >&2
+  echo "lane_mode: interactive | runner (default: interactive)" >&2
   exit 2
 fi
 
@@ -13,6 +14,7 @@ REPO_ROOT="$3"
 TRACE_ROOT="$4"
 TRACE_SERVER_ADDR="$5"
 ROLE="$6"
+LANE_MODE="${7:-interactive}"
 
 TRACE_API_BASE_URL="${TRACE_API_BASE_URL:-http://${TRACE_SERVER_ADDR}}"
 SHELL_BIN="${SHELL:-/bin/zsh}"
@@ -23,16 +25,28 @@ export LANE_PROFILE="$PROFILE"
 
 cd "$REPO_ROOT"
 
+validate_lane_mode() {
+  case "$1" in
+    interactive|runner)
+      ;;
+    *)
+      echo "invalid lane mode: $1 (allowed: interactive, runner)" >&2
+      exit 2
+      ;;
+  esac
+}
+
 print_common_banner() {
   echo "TRACE_ROOT=$TRACE_ROOT"
   echo "TRACE_SERVER_ADDR=$TRACE_SERVER_ADDR"
   echo "TRACE_API_BASE_URL=$TRACE_API_BASE_URL"
   echo "LANE_ID=$LANE_ID"
   echo "LANE_PROFILE=$LANE_PROFILE"
+  echo "LANE_MODE=$LANE_MODE"
 }
 
 print_lane_hints() {
-  cat <<'EOF'
+  cat <<'EOF_HINTS'
 Manual lane flow (copy/paste and replace IDs):
   TASK_ID=TASK-DEMO
   RUN_ID="${LANE_ID}-run-$(date +%s)"
@@ -56,11 +70,22 @@ Manual lane flow (copy/paste and replace IDs):
   curl -sS -X POST "$TRACE_API_BASE_URL/tasks/$TASK_ID/release" \
     -H 'content-type: application/json' \
     -d "{\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1}"
-EOF
+EOF_HINTS
+}
+
+print_runner_hints() {
+  cat <<'EOF_HINTS'
+Runner mode env knobs:
+  TRACE_RUNNER_TASK_COUNT        number of tasks to emit (default: 1)
+  TRACE_RUNNER_TASK_PREFIX       task prefix (default: TASK-SMOKE)
+  TRACE_RUNNER_NONCE             run nonce (default: unix timestamp)
+  TRACE_RUNNER_VERDICT           verdict payload value (default: pass)
+  TRACE_RUNNER_EXIT_AFTER_RUN    set to 1 to exit pane process after run
+EOF_HINTS
 }
 
 print_observer_hints() {
-  cat <<'EOF'
+  cat <<'EOF_HINTS'
 Observer commands:
   curl -sS "$TRACE_API_BASE_URL/tasks" | jq .
   curl -sS -X POST "$TRACE_API_BASE_URL/benchmarks/evaluate" \
@@ -68,7 +93,94 @@ Observer commands:
     -d '{"report_id":"smoke_'"$(date +%s)"'"}' | jq .
 
   ls -la "$TRACE_ROOT/.trace/reports"
-EOF
+EOF_HINTS
+}
+
+iso_now() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+post_json() {
+  local url="$1"
+  local payload="$2"
+  local response_file
+  local http_code
+  local body
+
+  response_file="$(mktemp)"
+  http_code="$(curl -sS -o "$response_file" -w '%{http_code}' -X POST "$url" -H 'content-type: application/json' -d "$payload")"
+  body="$(cat "$response_file")"
+  rm -f "$response_file"
+
+  if (( http_code < 200 || http_code >= 300 )); then
+    echo "request failed: POST $url ($http_code)" >&2
+    echo "$body" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$body"
+}
+
+run_scripted_lane() {
+  local task_count="${TRACE_RUNNER_TASK_COUNT:-1}"
+  local task_prefix="${TRACE_RUNNER_TASK_PREFIX:-TASK-SMOKE}"
+  local nonce="${TRACE_RUNNER_NONCE:-$(date +%s)}"
+  local verdict="${TRACE_RUNNER_VERDICT:-pass}"
+
+  if ! [[ "$task_count" =~ ^[0-9]+$ ]] || (( task_count < 1 )); then
+    echo "TRACE_RUNNER_TASK_COUNT must be a positive integer" >&2
+    exit 2
+  fi
+
+  echo "[TRACE RUNNER MODE]"
+  echo "task_count=$task_count"
+  echo "task_prefix=$task_prefix"
+  echo "nonce=$nonce"
+  echo "verdict=$verdict"
+  echo
+
+  local index
+  for ((index = 1; index <= task_count; index += 1)); do
+    local task_id="${task_prefix}-${LANE_ID}-${nonce}-${index}"
+    local run_id="${LANE_ID}-run-${nonce}-${index}"
+    local candidate_id="C-${run_id}"
+    local output_chunk="runner output lane=${LANE_ID} profile=${LANE_PROFILE} task=${task_id}"
+
+    echo "[runner] task $index/$task_count task_id=$task_id run_id=$run_id"
+
+    post_json \
+      "$TRACE_API_BASE_URL/tasks/$task_id/claim" \
+      "{\"worker_id\":\"$LANE_ID\",\"expected_epoch\":0,\"title\":\"$task_id\"}" \
+      >/dev/null
+
+    post_json \
+      "$TRACE_API_BASE_URL/tasks/$task_id/runs/start" \
+      "{\"run_id\":\"$run_id\",\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"profile\":\"$LANE_PROFILE\",\"provider\":\"openai\",\"model\":\"gpt-5-$LANE_PROFILE\"}" \
+      >/dev/null
+
+    post_json \
+      "$TRACE_API_BASE_URL/tasks/$task_id/runs/$run_id/output" \
+      "{\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"stream\":\"stdout\",\"encoding\":\"utf8\",\"chunk\":\"$output_chunk\",\"chunk_index\":0,\"final\":true}" \
+      >/dev/null
+
+    post_json \
+      "$TRACE_API_BASE_URL/tasks/$task_id/runs/$run_id/candidates" \
+      "{\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"candidate_id\":\"$candidate_id\"}" \
+      >/dev/null
+
+    post_json \
+      "$TRACE_API_BASE_URL/events" \
+      "{\"global_seq\":null,\"ts\":\"$(iso_now)\",\"task_id\":\"$task_id\",\"run_id\":\"$run_id\",\"kind\":\"verdict.recorded\",\"payload\":{\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"verdict\":\"$verdict\"}}" \
+      >/dev/null
+
+    post_json \
+      "$TRACE_API_BASE_URL/tasks/$task_id/release" \
+      "{\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1}" \
+      >/dev/null
+  done
+
+  echo
+  echo "runner completed $task_count task(s)"
 }
 
 run_trace_server() {
@@ -96,6 +208,8 @@ run_trace_server() {
   return 127
 }
 
+validate_lane_mode "$LANE_MODE"
+
 case "$ROLE" in
   server)
     echo "[TRACE SERVER PANE]"
@@ -122,7 +236,20 @@ case "$ROLE" in
     echo "[TRACE LANE PANE]"
     print_common_banner
     echo
-    print_lane_hints
+
+    if [[ "$LANE_MODE" == "runner" ]]; then
+      print_runner_hints
+      echo
+      run_scripted_lane
+      if [[ "${TRACE_RUNNER_EXIT_AFTER_RUN:-0}" == "1" ]]; then
+        exit 0
+      fi
+      echo
+      echo "runner completed; opening interactive shell"
+    else
+      print_lane_hints
+    fi
+
     echo
     exec "$SHELL_BIN" -i
     ;;

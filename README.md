@@ -65,7 +65,7 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
 3. Open `http://127.0.0.1:4173` and use the **Orchestration** section:
    - `Start Session`
    - `Status`
-   - `Add Lane` / `Add Pane`
+   - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
 
 ## API Smoke (No Browser)

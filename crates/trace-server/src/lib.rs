@@ -595,6 +595,7 @@ struct TmuxAddLaneRequest {
     session: Option<String>,
     lane_name: String,
     profile: Option<String>,
+    mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -604,6 +605,7 @@ struct TmuxAddPaneRequest {
     lane_name: String,
     profile: Option<String>,
     target: Option<String>,
+    mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -847,6 +849,15 @@ fn validate_tmux_target(value: &str) -> Result<(), (StatusCode, Json<ApiErrorRes
     Ok(())
 }
 
+fn validate_tmux_lane_mode(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    match value {
+        "interactive" | "runner" => Ok(()),
+        _ => Err(bad_request_error(
+            "mode must be one of: interactive, runner",
+        )),
+    }
+}
+
 fn validate_trace_root(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
     if value.is_empty() {
         return Err(bad_request_error("trace_root cannot be empty"));
@@ -951,43 +962,64 @@ async fn post_tmux_add_lane_handler(
     State(state): State<ApiState>,
     Json(request): Json<TmuxAddLaneRequest>,
 ) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
-    let session = validate_tmux_session(request.session)?;
-    validate_tmux_token("lane_name", &request.lane_name)?;
-    let profile = request.profile.unwrap_or_else(|| request.lane_name.clone());
+    let TmuxAddLaneRequest {
+        session,
+        lane_name,
+        profile,
+        mode,
+    } = request;
+
+    let session = validate_tmux_session(session)?;
+    validate_tmux_token("lane_name", &lane_name)?;
+    let profile = profile.unwrap_or_else(|| lane_name.clone());
     validate_tmux_token("profile", &profile)?;
 
-    execute_tmux_script(
-        &state,
-        vec![
-            "--session".to_string(),
-            session,
-            "add-lane".to_string(),
-            request.lane_name,
-            profile,
-        ],
-    )
-    .await
+    let mut args = vec![
+        "--session".to_string(),
+        session,
+        "add-lane".to_string(),
+        lane_name,
+        profile,
+    ];
+    if let Some(mode) = mode {
+        validate_tmux_lane_mode(&mode)?;
+        args.push(mode);
+    }
+
+    execute_tmux_script(&state, args).await
 }
 
 async fn post_tmux_add_pane_handler(
     State(state): State<ApiState>,
     Json(request): Json<TmuxAddPaneRequest>,
 ) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
-    let session = validate_tmux_session(request.session)?;
-    validate_tmux_token("lane_name", &request.lane_name)?;
-    let profile = request.profile.unwrap_or_else(|| request.lane_name.clone());
+    let TmuxAddPaneRequest {
+        session,
+        lane_name,
+        profile,
+        target,
+        mode,
+    } = request;
+
+    let session = validate_tmux_session(session)?;
+    validate_tmux_token("lane_name", &lane_name)?;
+    let profile = profile.unwrap_or_else(|| lane_name.clone());
     validate_tmux_token("profile", &profile)?;
 
     let mut args = vec![
         "--session".to_string(),
         session,
         "add-pane".to_string(),
-        request.lane_name,
+        lane_name,
         profile,
     ];
-    if let Some(target) = request.target {
+    if let Some(target) = target {
         validate_tmux_target(&target)?;
         args.push(target);
+    }
+    if let Some(mode) = mode {
+        validate_tmux_lane_mode(&mode)?;
+        args.push(mode);
     }
 
     execute_tmux_script(&state, args).await
@@ -2208,6 +2240,90 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_add_lane_passes_runner_mode_to_script() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let script_path = root.join("tmux-ok.sh");
+        write_executable_script(
+            &script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"ok\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/add-lane")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "lane_name": "codex4",
+                            "profile": "high",
+                            "mode": "runner"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("--session trace-web-test"));
+        assert!(logged_args.contains("add-lane codex4 high runner"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_add_pane_rejects_invalid_mode() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let script_path = root.join("tmux-unused.sh");
+        write_executable_script(&script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/add-pane")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "lane_name": "codex5",
+                            "profile": "flash",
+                            "mode": "batch"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("mode must be one of: interactive, runner"));
+
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 

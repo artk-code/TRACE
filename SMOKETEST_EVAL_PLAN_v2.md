@@ -19,21 +19,22 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
 - CORS contract for browser-origin API access.
 - Backend tmux orchestration APIs (`start/status/add-lane/add-pane/stop`).
 - Web tmux orchestration controls wired to those APIs.
+- tmux lane launch supports `mode=interactive|runner`.
+- Runner mode executes typed writes + `verdict.recorded` automatically.
 - Benchmark generation endpoint (`POST /benchmarks/evaluate`) writing JSON/Markdown artifacts.
 
 ## Confirmed Gaps
-- Lane execution is still manual in shell panes.
+- No coordinated smoke-run job API for multi-lane lifecycle/status.
 - No smoke-run workflow endpoint coordinating lane lifecycle.
 - No report list/get API for UI retrieval.
 - No deterministic task pack + expected scoring contract.
 - No browser E2E suite verifying end-to-end smoke behavior.
 
 ## Milestones
-1. M1: Scripted lane runner mode.
-2. M2: Smoke workflow API (trigger + status).
-3. M3: Report list/get endpoints.
-4. M4: Web report UX (summary + drill-down).
-5. M5: Playwright smoke tests + CI gate.
+1. M1: Smoke workflow API (trigger + status).
+2. M2: Report list/get endpoints.
+3. M3: Web report UX (summary + drill-down).
+4. M4: Playwright smoke tests + CI gate.
 
 ## Acceptance Criteria
 - At least 3 lanes can run a web-triggered smoke flow against one server/root.

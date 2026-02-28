@@ -26,8 +26,10 @@ export default function App() {
   const [serverAddr, setServerAddr] = useState("127.0.0.1:18086");
   const [laneName, setLaneName] = useState("codex4");
   const [laneProfile, setLaneProfile] = useState("high");
+  const [laneMode, setLaneMode] = useState("interactive");
   const [paneLaneName, setPaneLaneName] = useState("codex5");
   const [paneProfile, setPaneProfile] = useState("flash");
+  const [paneMode, setPaneMode] = useState("interactive");
   const [paneTarget, setPaneTarget] = useState("");
   const [orchestrationBusy, setOrchestrationBusy] = useState<string | null>(null);
   const [orchestrationError, setOrchestrationError] = useState<string | null>(null);
@@ -118,12 +120,26 @@ export default function App() {
             <input value={laneProfile} onChange={(event) => setLaneProfile(event.target.value)} />
           </label>
           <label>
+            Add-Lane Mode:
+            <select value={laneMode} onChange={(event) => setLaneMode(event.target.value)}>
+              <option value="interactive">interactive</option>
+              <option value="runner">runner</option>
+            </select>
+          </label>
+          <label>
             Add-Pane Name:
             <input value={paneLaneName} onChange={(event) => setPaneLaneName(event.target.value)} />
           </label>
           <label>
             Add-Pane Profile:
             <input value={paneProfile} onChange={(event) => setPaneProfile(event.target.value)} />
+          </label>
+          <label>
+            Add-Pane Mode:
+            <select value={paneMode} onChange={(event) => setPaneMode(event.target.value)}>
+              <option value="interactive">interactive</option>
+              <option value="runner">runner</option>
+            </select>
           </label>
           <label>
             Add-Pane Target:
@@ -168,6 +184,7 @@ export default function App() {
                   session: optionalValue(session),
                   lane_name: laneName.trim(),
                   profile: optionalValue(laneProfile),
+                  mode: laneMode === "interactive" ? undefined : laneMode,
                 }),
               )
             }
@@ -183,6 +200,7 @@ export default function App() {
                   lane_name: paneLaneName.trim(),
                   profile: optionalValue(paneProfile),
                   target: optionalValue(paneTarget) ?? defaultPaneTarget,
+                  mode: paneMode === "interactive" ? undefined : paneMode,
                 }),
               )
             }

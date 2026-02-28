@@ -30,6 +30,7 @@ export type TmuxAddLaneRequest = {
   session?: string;
   lane_name: string;
   profile?: string;
+  mode?: string;
 };
 
 export type TmuxAddPaneRequest = {
@@ -37,6 +38,7 @@ export type TmuxAddPaneRequest = {
   lane_name: string;
   profile?: string;
   target?: string;
+  mode?: string;
 };
 
 async function requestJson(path: string, init?: RequestInit): Promise<unknown> {

@@ -30,11 +30,13 @@ Commands:
       Attach to session.
   status
       Show windows and panes for the session.
-  add-lane <lane_name> [profile]
-      Add new lane window with interactive shell.
-  add-pane <lane_name> [profile] [target]
-      Split target window/pane and start lane shell.
+  add-lane <lane_name> [profile] [mode]
+      Add new lane window.
+      mode: interactive | runner (default: interactive)
+  add-pane <lane_name> [profile] [target] [mode]
+      Split target window/pane and start lane.
       default target: <session>:lanes
+      mode: interactive | runner (default: interactive)
   stop
       Kill tmux session.
   help
@@ -44,7 +46,8 @@ Examples:
   $0 start
   $0 --session trace-smoke attach
   $0 add-lane codex4 high
-  $0 add-pane codex5 flash trace-smoke:lanes
+  $0 add-lane codex4 high runner
+  $0 add-pane codex5 flash trace-smoke:lanes runner
 EOF
 }
 
@@ -59,18 +62,38 @@ session_exists() {
   tmux has-session -t "$SESSION" 2>/dev/null
 }
 
+is_lane_mode() {
+  case "$1" in
+    interactive|runner)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_lane_mode() {
+  if ! is_lane_mode "$1"; then
+    echo "invalid lane mode: $1 (allowed: interactive, runner)" >&2
+    exit 2
+  fi
+}
+
 build_lane_cmd() {
   local role="$1"
   local lane="$2"
   local profile="$3"
-  printf "%q %q %q %q %q %q %q" \
+  local mode="${4:-interactive}"
+  printf "%q %q %q %q %q %q %q %q" \
     "$LANE_BOOTSTRAP" \
     "$lane" \
     "$profile" \
     "$REPO_ROOT" \
     "$TRACE_ROOT_VALUE" \
     "$TRACE_SERVER_ADDR_VALUE" \
-    "$role"
+    "$role" \
+    "$mode"
 }
 
 parse_global_options() {
@@ -162,18 +185,18 @@ start_session() {
     exit 1
   fi
 
-  tmux new-session -d -s "$SESSION" -n server "$(build_lane_cmd server server control)"
+  tmux new-session -d -s "$SESSION" -n server "$(build_lane_cmd server server control interactive)"
   tmux set-environment -t "$SESSION" TRACE_ROOT "$TRACE_ROOT_VALUE"
   tmux set-environment -t "$SESSION" TRACE_SERVER_ADDR "$TRACE_SERVER_ADDR_VALUE"
   tmux set-environment -t "$SESSION" TRACE_API_BASE_URL "http://$TRACE_SERVER_ADDR_VALUE"
   tmux set-environment -t "$SESSION" TRACE_REPO_ROOT "$REPO_ROOT"
 
-  tmux new-window -t "${SESSION}:" -n lanes "$(build_lane_cmd lane flash flash)"
-  tmux split-window -t "${SESSION}:lanes" -h "$(build_lane_cmd lane high high)"
-  tmux split-window -t "${SESSION}:lanes" -v "$(build_lane_cmd lane extra extra)"
+  tmux new-window -t "${SESSION}:" -n lanes "$(build_lane_cmd lane flash flash interactive)"
+  tmux split-window -t "${SESSION}:lanes" -h "$(build_lane_cmd lane high high interactive)"
+  tmux split-window -t "${SESSION}:lanes" -v "$(build_lane_cmd lane extra extra interactive)"
   tmux select-layout -t "${SESSION}:lanes" tiled
 
-  tmux new-window -t "${SESSION}:" -n observer "$(build_lane_cmd observer observer observer)"
+  tmux new-window -t "${SESSION}:" -n observer "$(build_lane_cmd observer observer observer interactive)"
   tmux select-window -t "${SESSION}:lanes"
 
   echo "started session '$SESSION'"
@@ -224,16 +247,18 @@ add_lane() {
 
   local lane_name="${1:-}"
   local profile="${2:-}"
+  local mode="${3:-interactive}"
   if [[ -z "$lane_name" ]]; then
-    echo "usage: $0 [global opts] add-lane <lane_name> [profile]" >&2
+    echo "usage: $0 [global opts] add-lane <lane_name> [profile] [mode]" >&2
     exit 2
   fi
   if [[ -z "$profile" ]]; then
     profile="$lane_name"
   fi
+  validate_lane_mode "$mode"
 
-  tmux new-window -t "${SESSION}:" -n "lane-${lane_name}" "$(build_lane_cmd lane "$lane_name" "$profile")"
-  echo "added lane window: lane-${lane_name} (profile=$profile)"
+  tmux new-window -t "${SESSION}:" -n "lane-${lane_name}" "$(build_lane_cmd lane "$lane_name" "$profile" "$mode")"
+  echo "added lane window: lane-${lane_name} (profile=$profile mode=$mode)"
 }
 
 add_pane() {
@@ -246,18 +271,32 @@ add_pane() {
 
   local lane_name="${1:-}"
   local profile="${2:-}"
-  local target="${3:-${SESSION}:lanes}"
+  local target="${SESSION}:lanes"
+  local mode="interactive"
+  local arg3="${3:-}"
+  local arg4="${4:-}"
   if [[ -z "$lane_name" ]]; then
-    echo "usage: $0 [global opts] add-pane <lane_name> [profile] [target]" >&2
+    echo "usage: $0 [global opts] add-pane <lane_name> [profile] [target] [mode]" >&2
     exit 2
   fi
   if [[ -z "$profile" ]]; then
     profile="$lane_name"
   fi
+  if [[ -n "$arg3" ]]; then
+    if is_lane_mode "$arg3" && [[ -z "$arg4" ]]; then
+      mode="$arg3"
+    else
+      target="$arg3"
+      if [[ -n "$arg4" ]]; then
+        mode="$arg4"
+      fi
+    fi
+  fi
+  validate_lane_mode "$mode"
 
-  tmux split-window -t "$target" -v "$(build_lane_cmd lane "$lane_name" "$profile")"
+  tmux split-window -t "$target" -v "$(build_lane_cmd lane "$lane_name" "$profile" "$mode")"
   tmux select-layout -t "$target" tiled || true
-  echo "added lane pane: $lane_name (profile=$profile) on target $target"
+  echo "added lane pane: $lane_name (profile=$profile mode=$mode) on target $target"
 }
 
 stop_session() {

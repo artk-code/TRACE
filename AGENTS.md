@@ -34,8 +34,8 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 ## Smoketest Readiness (2026-02-28)
 - Shared-server ingest safety (lock + lease fencing): **80%**
 - Model-vs-model trace capture/report generation: **70%**
-- Web-driven orchestration control surface: **60%**
-- Browser-driven smoke + report UX: **45%**
+- Web-driven orchestration control surface: **65%**
+- Browser-driven smoke + report UX: **50%**
 - Deterministic evaluator/scoring: **20%**
 - Merge + PR-capable output pipeline: **15%**
 
@@ -44,11 +44,14 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Typed claim/run/output/candidate/release paths are active and fenced.
 - tmux orchestration routes are active and validated for basic inputs.
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop.
+- Lane shells support two execution modes:
+  - `interactive` (manual copy/paste flow)
+  - `runner` (scripted claim/run/output/candidate/verdict/release flow)
 - Benchmark report generation writes JSON+Markdown artifacts with sanitized report IDs.
 
 ## Known Gaps Blocking "Super Smoketest"
-- Lane execution is still manual/human-in-the-loop:
-  - panes open interactive shells with copy/paste hints.
+- Runner mode is not coordinated by a single smoke workflow yet:
+  - lane runners can be launched, but no backend job orchestrates full multi-lane lifecycle/status.
 - No smoke workflow endpoint coordinating scripted Flash/High/Extra runs.
 - No report list/get API for browser retrieval; reports are filesystem artifacts only.
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
@@ -58,19 +61,16 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Scripted lane runner mode.
-  - Keep interactive tmux mode for humans.
-  - Add non-interactive lane execution path for smoke automation.
-2. Smoke workflow API.
+1. Smoke workflow API.
   - One trigger to coordinate multi-lane run lifecycle.
   - Return status for polling in web UI.
-3. Report retrieval APIs.
+2. Report retrieval APIs.
   - Add report list/get endpoints rooted under `.trace/reports`.
-4. Web smoke/report UX.
+3. Web smoke/report UX.
   - Add run/evaluate/report display surfaces in web app.
-5. Browser E2E + CI gate.
+4. Browser E2E + CI gate.
   - Add Playwright smoke test and enforce in CI.
-6. Deterministic evaluator + merge pipeline.
+5. Deterministic evaluator + merge pipeline.
   - Seed expected-output tasks.
   - Add scoring contract and merge/PR output path.
 
@@ -84,17 +84,25 @@ Prerequisite:
   - `scripts/trace-smoke-tmux.sh attach`
 3. Add lane window:
   - `scripts/trace-smoke-tmux.sh add-lane codex4 high`
+  - `scripts/trace-smoke-tmux.sh add-lane codex4 high runner`
 4. Add lane pane:
   - `scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes`
-5. Check status:
+  - `scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes runner`
+5. Runner knobs (optional):
+  - `TRACE_RUNNER_TASK_COUNT=3`
+  - `TRACE_RUNNER_TASK_PREFIX=TASK-SMOKE`
+  - `TRACE_RUNNER_VERDICT=pass`
+  - `TRACE_RUNNER_EXIT_AFTER_RUN=1`
+6. Check status:
   - `scripts/trace-smoke-tmux.sh status`
-6. Stop:
+7. Stop:
   - `scripts/trace-smoke-tmux.sh stop`
 
 ## Tmux Bug Ledger (Current)
 - Fixed: `add-lane`/`add-pane` inherit `TRACE_ROOT` + `TRACE_SERVER_ADDR` from session env when global flags omitted.
 - Fixed: `status` pane listing is session-scoped.
 - Fixed: server pane startup falls back to `cargo run -p trace-server` when `rustup stable` fails/unavailable.
+- Fixed: lane runner mode (`mode=runner`) now emits typed write events plus `verdict.recorded` without manual copy/paste.
 - Open: pane command injection can race if commands are blasted without pacing.
 - Open: no autonomous lane lifecycle manager yet.
 
@@ -102,7 +110,7 @@ Prerequisite:
 - Run exactly one TRACE server process per shared `TRACE_ROOT`.
 - Keep `run_id` globally unique (not just per task).
 - Use wrapper scripts for pane/window creation instead of raw tmux command strings.
-- Treat lane panes as human shells until scripted runner mode lands.
+- Use `mode=runner` when you want scripted writes; default lane mode remains interactive.
 - Do not treat benchmark pass/fail as authoritative quality until deterministic evaluator lands.
 
 ## Core Contracts
@@ -125,6 +133,8 @@ Prerequisite:
 - `test_cors_preflight_allows_local_dev_origin`
 - `test_tmux_start_route_invokes_configured_script_with_expected_args`
 - `test_tmux_add_lane_rejects_invalid_lane_name`
+- `test_tmux_add_lane_passes_runner_mode_to_script`
+- `test_tmux_add_pane_rejects_invalid_mode`
 - `test_tmux_status_maps_script_exit_code_one_to_conflict`
 - `web/src/guards.test.ts` runtime schema guard coverage
 
