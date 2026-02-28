@@ -36,9 +36,12 @@ Build a working multi-agent evaluation system where multiple Codex terminals can
 - Lease-sensitive writes reject stale/mismatched holder+epoch paths.
 - Run metadata fields (`model`, `provider`, `profile`, `temperature`) are accepted on run start.
 - Benchmark reports can be generated from logged events into JSON+Markdown artifacts.
+- tmux smoke orchestration scripts exist for human-in-the-loop multi-lane sessions:
+  - `scripts/trace-smoke-tmux.sh`
+  - `scripts/trace-lane-shell.sh`
 
 ## What Is Still Broken For The Super Smoketest
-- No orchestration harness to launch and coordinate multiple Codex agents against one server.
+- Orchestration is manual/human-in-the-loop; no autonomous Codex runner lifecycle yet.
 - No seeded deterministic evaluator task pack with expected-output scoring rules.
 - Benchmark report is aggregation-only today; it is not yet a deterministic judge for quality.
 - No persisted code artifact linkage per candidate (patch/diff metadata is not modeled yet).
@@ -81,6 +84,53 @@ Build a working multi-agent evaluation system where multiple Codex terminals can
 4. P3: UI + CLI workflow.
   - UI: benchmark leaderboard + run breakdown + merge action visibility.
   - CLI: typed write commands + benchmark + merge/PR output commands.
+
+## Tmux Orchestration Runbook (Now)
+Prerequisite:
+- `tmux` must be installed on the host running TRACE/operator terminals.
+
+1. Start session (server + flash/high/extra + observer):
+  - `scripts/trace-smoke-tmux.sh start`
+2. Attach from any terminal:
+  - `scripts/trace-smoke-tmux.sh attach`
+3. Add a new lane as a window:
+  - `scripts/trace-smoke-tmux.sh add-lane codex4 high`
+4. Add a new lane as a pane (for web-triggered terminal spawn behavior):
+  - `scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes`
+5. Session introspection:
+  - `scripts/trace-smoke-tmux.sh status`
+6. Stop session:
+  - `scripts/trace-smoke-tmux.sh stop`
+
+## Tmux Bug Ledger (2026-02-28)
+- Fixed: `add-lane`/`add-pane` now hydrate `TRACE_ROOT` + `TRACE_SERVER_ADDR` from tmux session env when global flags are omitted.
+  - Impact: dynamic lane spawns no longer drift to default `127.0.0.1:18080` or repo-local `.trace-smoke`.
+- Fixed: `status` pane listing is now session-scoped.
+  - Impact: `scripts/trace-smoke-tmux.sh status` no longer mixes panes from unrelated tmux sessions.
+- Fixed: server pane startup now falls back to `cargo run -p trace-server` when `rustup stable` is unavailable/fails.
+  - Impact: fewer false-negative startup failures on partially configured hosts.
+- Open: pane command injection via `tmux send-keys` can race if multiple commands are blasted without pacing.
+  - Mitigation: send one command at a time and wait for prompt/API response between steps.
+- Open: orchestration remains human-driven; there is still no autonomous runner lifecycle manager.
+
+## Orchestration Pitfalls (Important)
+- Run exactly one TRACE server process per shared `TRACE_ROOT`.
+- Keep `run_id` globally unique (not just per task) to avoid run aggregation collisions.
+- Use the wrapper script for pane/window creation instead of raw tmux command strings.
+- Treat lane panes as human shells: commands are operator-driven unless an explicit runner is added.
+- If spawning lanes from a web backend, call the wrapper script with validated lane/profile values.
+- Do not rely on benchmark pass/fail as authoritative quality scoring until deterministic evaluator logic lands.
+
+## Quick Verification (Tmux)
+1. `scripts/trace-smoke-tmux.sh --session trace-smoke-check --trace-root /tmp/trace-smoke-check --addr 127.0.0.1:18086 start --no-attach`
+2. `scripts/trace-smoke-tmux.sh --session trace-smoke-check status`
+  - Verify `session config` shows `/tmp/trace-smoke-check` and `127.0.0.1:18086`.
+3. `scripts/trace-smoke-tmux.sh --session trace-smoke-check add-lane codex4 high`
+4. `scripts/trace-smoke-tmux.sh --session trace-smoke-check add-pane codex5 flash trace-smoke-check:lanes`
+5. `curl -sS http://127.0.0.1:18086/tasks`
+  - Expect JSON response (typically `[]` before writes).
+6. `curl -sS -X POST http://127.0.0.1:18086/benchmarks/evaluate -H 'content-type: application/json' -d '{"report_id":"tmux_smoke_manual"}'`
+7. `scripts/trace-smoke-tmux.sh --session trace-smoke-check stop`
 
 ## Sanity Test Matrix (Current)
 - `test_typed_claim_renew_release_flow`
