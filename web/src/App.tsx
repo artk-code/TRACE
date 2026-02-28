@@ -132,6 +132,9 @@ export default function App() {
     if (!status) {
       throw new Error(`Unable to verify Codex auth before ${actionName}`);
     }
+    if (status.policy === "optional") {
+      return;
+    }
     if (!status.available) {
       throw new Error(
         `Codex CLI not available. Install Codex CLI or set TRACE_CODEX_BIN. stderr=${status.stderr}`,
@@ -157,6 +160,7 @@ export default function App() {
         </p>
         {codexAuthBusy ? <p>Checking Codex auth...</p> : null}
         {codexAuthError ? <p>Codex auth check failed: {codexAuthError}</p> : null}
+        {codexAuthStatus ? <p>Auth policy: {codexAuthStatus.policy}</p> : null}
         {codexAuthStatus ? <pre>{JSON.stringify(codexAuthStatus, null, 2)}</pre> : null}
         {codexAuthStatus?.requires_login ? (
           <p>Run one of: {codexAuthStatus.login_commands.join(" | ")}</p>

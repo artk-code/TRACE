@@ -75,6 +75,7 @@ export const tmuxCommandResponseSchema = z
 export const codexAuthStatusSchema = z
   .object({
     command: z.string(),
+    policy: z.enum(["required", "optional"]),
     available: z.boolean(),
     logged_in: z.boolean(),
     method: z.string().optional().nullable(),

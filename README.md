@@ -56,7 +56,10 @@ pnpm --dir web build
 ## Local Run (Server + Web)
 1. Start TRACE server:
 ```bash
-TRACE_SERVER_ADDR=127.0.0.1:18086 TRACE_ROOT=/tmp/trace-web-smoke cargo run -p trace-server
+TRACE_SERVER_ADDR=127.0.0.1:18086 \
+TRACE_ROOT=/tmp/trace-web-smoke \
+TRACE_CODEX_AUTH_POLICY=required \
+cargo run -p trace-server
 ```
 2. In another terminal, run web UI:
 ```bash
@@ -69,8 +72,19 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
    - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
 
-## Codex Auth Preflight (Required For Lane Spawn)
-TRACE now exposes a Codex auth status endpoint used by the web preflight gate.
+## Codex Auth Policy + Preflight
+TRACE exposes a Codex auth status endpoint and enforces auth at lane-spawn time.
+
+- Auth status endpoint:
+  - `GET /orchestrator/auth/codex/status`
+- Lane-spawn enforcement:
+  - `POST /orchestrator/tmux/add-lane`
+  - `POST /orchestrator/tmux/add-pane`
+- Policy env var:
+  - `TRACE_CODEX_AUTH_POLICY=required|optional`
+  - default is `required`
+- Codex binary override:
+  - `TRACE_CODEX_BIN=/path/to/codex`
 
 1. Check auth status:
 ```bash
@@ -82,9 +96,35 @@ codex login
 codex login --device-auth
 printenv OPENAI_API_KEY | codex login --with-api-key
 ```
-3. Re-check status and confirm:
+3. Re-check status and confirm when policy is `required`:
+   - `policy="required"`
    - `available=true`
    - `logged_in=true`
+4. Optional local bypass (not recommended for shared smoke tests):
+```bash
+TRACE_CODEX_AUTH_POLICY=optional cargo run -p trace-server
+```
+
+## Credential Handling And Safety
+How credentials are handled on your machine:
+
+- `codex login` (ChatGPT auth) stores credentials in `$CODEX_HOME/auth.json` (default `$HOME/.codex/auth.json`).
+- `codex login --device-auth` is the same auth path, intended for SSH/headless hosts.
+- `codex login --with-api-key` reads API key material from stdin (avoid putting raw keys in shell history).
+- Codex can be configured to store credentials in OS keychain instead of `auth.json`:
+```toml
+# ~/.codex/config.toml
+cli_auth_credentials_store = "keyring"
+```
+- TRACE does not read raw token values directly. TRACE only shells out to `codex login status` and receives status text (`logged_in`, auth method hints, remediation commands).
+- Treat `auth.json` as secret material:
+  - never commit it
+  - do not copy it between users
+  - prefer keychain storage on shared machines
+
+References:
+- https://developers.openai.com/codex/auth
+- https://developers.openai.com/codex/cli
 
 ## API Smoke (No Browser)
 ```bash

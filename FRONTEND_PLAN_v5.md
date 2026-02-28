@@ -11,23 +11,23 @@ Move from read-focused UI to browser-driven smoke orchestration and benchmark re
 - UI reads tasks/candidates/run output.
 - UI can invoke tmux orchestration actions:
   - start/status/add-lane/add-pane/stop
-- UI has Codex auth preflight check (`GET /orchestrator/auth/codex/status`) and blocks lane spawn if unauthenticated.
+- UI has Codex auth preflight check (`GET /orchestrator/auth/codex/status`).
+- UI gating follows backend policy:
+  - `policy=required` blocks lane spawn when unauthenticated
+  - `policy=optional` allows lane spawn
 
 ## Phase Sequence
-1. Phase A: Auth gate hardening.
-   - Keep explicit "Check Codex Auth" status panel.
-   - Add clear remediation commands when unauthenticated (`codex login`, `--device-auth`, API key login).
-2. Phase B: Smoke actions.
+1. Phase A: Smoke actions.
    - Add web action to trigger smoke workflow API (once backend exists).
    - Add explicit UI state machine: idle/running/succeeded/failed.
-3. Phase C: Benchmark controls.
+2. Phase B: Benchmark controls.
    - Add evaluate trigger and report selector.
    - Add per-model summary table (pass/fail/duration/disqualified).
-4. Phase D: Report drill-down.
+3. Phase C: Report drill-down.
    - Show per-run rows and basic filtering by model/profile.
-5. Phase E: Browser E2E.
+4. Phase D: Browser E2E.
    - Add Playwright for UI smoke flow.
-   - Validate auth preflight + orchestration action + report render path.
+   - Validate auth preflight + backend auth enforcement + orchestration action + report render path.
 
 ## Frontend Test Tracks
 - Unit (`vitest`): schema/guard and helper logic.

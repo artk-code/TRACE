@@ -97,6 +97,7 @@ describe("codex_auth_status_guard", () => {
   it("accepts codex auth status response shape", () => {
     const payload = {
       command: "codex login status",
+      policy: "required",
       available: true,
       logged_in: true,
       method: "chatgpt",
@@ -113,6 +114,7 @@ describe("codex_auth_status_guard", () => {
   it("rejects invalid codex auth status response shape", () => {
     const payload = {
       command: "codex login status",
+      policy: "required",
       available: "yes",
       logged_in: true,
       method: "chatgpt",

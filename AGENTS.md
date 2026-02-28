@@ -31,6 +31,9 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - `GET /orchestrator/auth/codex/status`
 - Backend tmux orchestration endpoints exist:
   - `POST /orchestrator/tmux/start|status|add-lane|add-pane|stop`
+- Backend lane-spawn auth enforcement exists:
+  - `TRACE_CODEX_AUTH_POLICY=required|optional` (default: `required`)
+  - `add-lane`/`add-pane` are blocked when auth is required and Codex is not logged in
 - Web UI can call tmux orchestration endpoints and display command results/errors.
 
 ## Smoketest Readiness (2026-02-28)
@@ -45,8 +48,8 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Multiple writers can append without sequence corruption.
 - Typed claim/run/output/candidate/release paths are active and fenced.
 - tmux orchestration routes are active and validated for basic inputs.
-- Web UI includes orchestration controls for start/status/add-lane/add-pane/stop.
-- Web UI includes Codex auth preflight check and blocks lane spawn when unauthenticated.
+- tmux add-lane/add-pane are auth-gated server-side when `TRACE_CODEX_AUTH_POLICY=required`.
+- Web UI includes orchestration controls for start/status/add-lane/add-pane/stop and auth preflight status.
 - Lane shells support two execution modes:
   - `interactive` (manual copy/paste flow)
   - `runner` (scripted claim/run/output/candidate/verdict/release flow)
@@ -55,8 +58,6 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 ## Known Gaps Blocking "Super Smoketest"
 - Runner mode is not coordinated by a single smoke workflow yet:
   - lane runners can be launched, but no backend job orchestrates full multi-lane lifecycle/status.
-- Backend tmux routes are not yet hard-enforcing Codex auth:
-  - auth gating is currently UI-level preflight + operator runbook.
 - No smoke workflow endpoint coordinating scripted Flash/High/Extra runs.
 - No report list/get API for browser retrieval; reports are filesystem artifacts only.
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
@@ -66,19 +67,16 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Codex auth enforcement policy.
-  - Add backend-enforced auth mode for tmux add-lane/add-pane (`required|optional`).
-  - Keep operator-friendly status endpoint + remediation commands.
-2. Smoke workflow API.
+1. Smoke workflow API.
   - One trigger to coordinate multi-lane run lifecycle.
   - Return status for polling in web UI.
-3. Report retrieval APIs.
+2. Report retrieval APIs.
   - Add report list/get endpoints rooted under `.trace/reports`.
-4. Web smoke/report UX.
+3. Web smoke/report UX.
   - Add run/evaluate/report display surfaces in web app.
-5. Browser E2E + CI gate.
+4. Browser E2E + CI gate.
   - Add Playwright smoke test and enforce in CI.
-6. Deterministic evaluator + merge pipeline.
+5. Deterministic evaluator + merge pipeline.
   - Seed expected-output tasks.
   - Add scoring contract and merge/PR output path.
 
@@ -90,15 +88,17 @@ Prerequisite:
   - `scripts/trace-smoke-tmux.sh start`
 2. Attach from terminal:
   - `scripts/trace-smoke-tmux.sh attach`
-3. Add lane window:
+3. Check Codex auth status:
+  - `curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .`
+  - if policy is `required`, run login if `logged_in=false`:
+    - `codex login`
+    - `codex login --device-auth`
+4. Add lane window:
   - `scripts/trace-smoke-tmux.sh add-lane codex4 high`
   - `scripts/trace-smoke-tmux.sh add-lane codex4 high runner`
-4. Add lane pane:
+5. Add lane pane:
   - `scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes`
   - `scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes runner`
-5. Check Codex auth (required before lane spawn):
-  - `curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .`
-  - if not logged in: `codex login` or `codex login --device-auth`
 6. Runner knobs (optional):
   - `TRACE_RUNNER_TASK_COUNT=3`
   - `TRACE_RUNNER_TASK_PREFIX=TASK-SMOKE`
@@ -144,6 +144,8 @@ Prerequisite:
 - `test_cors_preflight_allows_local_dev_origin`
 - `test_tmux_start_route_invokes_configured_script_with_expected_args`
 - `test_tmux_add_lane_rejects_invalid_lane_name`
+- `test_tmux_add_lane_requires_codex_auth_when_policy_required`
+- `test_tmux_add_pane_allows_when_policy_optional_and_not_logged_in`
 - `test_tmux_add_lane_passes_runner_mode_to_script`
 - `test_codex_auth_status_reports_chatgpt_login`
 - `test_codex_auth_status_reports_missing_binary`

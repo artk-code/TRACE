@@ -20,15 +20,15 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
 - CORS contract for browser-origin API access.
 - Backend tmux orchestration APIs (`start/status/add-lane/add-pane/stop`).
 - Backend Codex auth preflight API (`GET /orchestrator/auth/codex/status`).
+- Backend auth policy enforcement on lane spawn (`TRACE_CODEX_AUTH_POLICY=required|optional`, default `required`).
 - Web tmux orchestration controls wired to those APIs.
-- Web blocks lane spawn when Codex auth preflight fails.
+- Web auth preflight mirrors backend policy behavior for operator feedback.
 - tmux lane launch supports `mode=interactive|runner`.
 - Runner mode executes typed writes + `verdict.recorded` automatically.
 - Benchmark generation endpoint (`POST /benchmarks/evaluate`) writing JSON/Markdown artifacts.
 
 ## Confirmed Gaps
 - No coordinated smoke-run job API for multi-lane lifecycle/status.
-- tmux add-lane/add-pane routes do not yet hard-require auth server-side (UI currently enforces preflight).
 - No smoke-run workflow endpoint coordinating lane lifecycle.
 - No report list/get API for UI retrieval.
 - No deterministic task pack + expected scoring contract.
