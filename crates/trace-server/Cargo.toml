@@ -1,0 +1,12 @@
+[package]
+name = "trace-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+trace-api-types = { path = "../trace-api-types" }
+trace-normalizer = { path = "../trace-normalizer" }
+
+[lints]
+workspace = true

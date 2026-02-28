@@ -1,0 +1,11 @@
+[package]
+name = "trace-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+trace-events = { path = "../trace-events" }
+
+[lints]
+workspace = true

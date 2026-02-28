@@ -1,0 +1,10 @@
+{
+  "name": "trace-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "web:dev": "pnpm --dir web dev",
+    "web:build": "pnpm --dir web build",
+    "web:test": "pnpm --dir web test"
+  }
+}
