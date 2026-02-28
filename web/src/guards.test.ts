@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeOutputChunk, parseTaskResponse, parseTmuxCommandResponse } from "./guards";
+import {
+  decodeOutputChunk,
+  parseCodexAuthStatus,
+  parseTaskResponse,
+  parseTmuxCommandResponse,
+} from "./guards";
 
 describe("task_response_guard_accepts_nested_shape", () => {
   it("accepts nested TaskResponse shape", () => {
@@ -85,5 +90,39 @@ describe("tmux_command_response_guard", () => {
     };
 
     expect(() => parseTmuxCommandResponse(payload)).toThrow();
+  });
+});
+
+describe("codex_auth_status_guard", () => {
+  it("accepts codex auth status response shape", () => {
+    const payload = {
+      command: "codex login status",
+      available: true,
+      logged_in: true,
+      method: "chatgpt",
+      requires_login: false,
+      exit_code: 0,
+      stdout: "Logged in using ChatGPT",
+      stderr: "",
+      login_commands: ["codex login"],
+    };
+
+    expect(parseCodexAuthStatus(payload).logged_in).toBe(true);
+  });
+
+  it("rejects invalid codex auth status response shape", () => {
+    const payload = {
+      command: "codex login status",
+      available: "yes",
+      logged_in: true,
+      method: "chatgpt",
+      requires_login: false,
+      exit_code: 0,
+      stdout: "Logged in using ChatGPT",
+      stderr: "",
+      login_commands: ["codex login"],
+    };
+
+    expect(() => parseCodexAuthStatus(payload)).toThrow();
   });
 });

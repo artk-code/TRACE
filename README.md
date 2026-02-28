@@ -63,13 +63,33 @@ TRACE_SERVER_ADDR=127.0.0.1:18086 TRACE_ROOT=/tmp/trace-web-smoke cargo run -p t
 VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0.1 --port 4173
 ```
 3. Open `http://127.0.0.1:4173` and use the **Orchestration** section:
+   - `Check Codex Auth` (required before `Add Lane`/`Add Pane`)
    - `Start Session`
    - `Status`
    - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
 
+## Codex Auth Preflight (Required For Lane Spawn)
+TRACE now exposes a Codex auth status endpoint used by the web preflight gate.
+
+1. Check auth status:
+```bash
+curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .
+```
+2. If not logged in, authenticate with one of:
+```bash
+codex login
+codex login --device-auth
+printenv OPENAI_API_KEY | codex login --with-api-key
+```
+3. Re-check status and confirm:
+   - `available=true`
+   - `logged_in=true`
+
 ## API Smoke (No Browser)
 ```bash
+curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .
+
 curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/start \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke","trace_root":"/tmp/trace-web-smoke","addr":"127.0.0.1:18086"}'

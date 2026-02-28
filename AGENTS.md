@@ -27,6 +27,8 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - `POST /benchmarks/evaluate`
   - Writes `.trace/reports/<report_id>.json` + `.md`
 - Browser transport contract exists via CORS (dev origins + preflight coverage).
+- Codex auth preflight endpoint exists:
+  - `GET /orchestrator/auth/codex/status`
 - Backend tmux orchestration endpoints exist:
   - `POST /orchestrator/tmux/start|status|add-lane|add-pane|stop`
 - Web UI can call tmux orchestration endpoints and display command results/errors.
@@ -44,6 +46,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Typed claim/run/output/candidate/release paths are active and fenced.
 - tmux orchestration routes are active and validated for basic inputs.
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop.
+- Web UI includes Codex auth preflight check and blocks lane spawn when unauthenticated.
 - Lane shells support two execution modes:
   - `interactive` (manual copy/paste flow)
   - `runner` (scripted claim/run/output/candidate/verdict/release flow)
@@ -52,6 +55,8 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 ## Known Gaps Blocking "Super Smoketest"
 - Runner mode is not coordinated by a single smoke workflow yet:
   - lane runners can be launched, but no backend job orchestrates full multi-lane lifecycle/status.
+- Backend tmux routes are not yet hard-enforcing Codex auth:
+  - auth gating is currently UI-level preflight + operator runbook.
 - No smoke workflow endpoint coordinating scripted Flash/High/Extra runs.
 - No report list/get API for browser retrieval; reports are filesystem artifacts only.
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
@@ -61,16 +66,19 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Smoke workflow API.
+1. Codex auth enforcement policy.
+  - Add backend-enforced auth mode for tmux add-lane/add-pane (`required|optional`).
+  - Keep operator-friendly status endpoint + remediation commands.
+2. Smoke workflow API.
   - One trigger to coordinate multi-lane run lifecycle.
   - Return status for polling in web UI.
-2. Report retrieval APIs.
+3. Report retrieval APIs.
   - Add report list/get endpoints rooted under `.trace/reports`.
-3. Web smoke/report UX.
+4. Web smoke/report UX.
   - Add run/evaluate/report display surfaces in web app.
-4. Browser E2E + CI gate.
+5. Browser E2E + CI gate.
   - Add Playwright smoke test and enforce in CI.
-5. Deterministic evaluator + merge pipeline.
+6. Deterministic evaluator + merge pipeline.
   - Seed expected-output tasks.
   - Add scoring contract and merge/PR output path.
 
@@ -88,14 +96,17 @@ Prerequisite:
 4. Add lane pane:
   - `scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes`
   - `scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes runner`
-5. Runner knobs (optional):
+5. Check Codex auth (required before lane spawn):
+  - `curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .`
+  - if not logged in: `codex login` or `codex login --device-auth`
+6. Runner knobs (optional):
   - `TRACE_RUNNER_TASK_COUNT=3`
   - `TRACE_RUNNER_TASK_PREFIX=TASK-SMOKE`
   - `TRACE_RUNNER_VERDICT=pass`
   - `TRACE_RUNNER_EXIT_AFTER_RUN=1`
-6. Check status:
+7. Check status:
   - `scripts/trace-smoke-tmux.sh status`
-7. Stop:
+8. Stop:
   - `scripts/trace-smoke-tmux.sh stop`
 
 ## Tmux Bug Ledger (Current)
@@ -134,6 +145,8 @@ Prerequisite:
 - `test_tmux_start_route_invokes_configured_script_with_expected_args`
 - `test_tmux_add_lane_rejects_invalid_lane_name`
 - `test_tmux_add_lane_passes_runner_mode_to_script`
+- `test_codex_auth_status_reports_chatgpt_login`
+- `test_codex_auth_status_reports_missing_binary`
 - `test_tmux_add_pane_rejects_invalid_mode`
 - `test_tmux_status_maps_script_exit_code_one_to_conflict`
 - `web/src/guards.test.ts` runtime schema guard coverage

@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import type { TmuxCommandResponse } from "./contracts";
+import type { CodexAuthStatus, TmuxCommandResponse } from "./contracts";
 import {
+  fetchCodexAuthStatus,
   fetchCandidates,
   fetchRunOutput,
   fetchTasks,
@@ -47,6 +48,9 @@ export default function App() {
   const [paneWaitForRunner, setPaneWaitForRunner] = useState(true);
   const [paneRunnerTimeoutSec, setPaneRunnerTimeoutSec] = useState("180");
   const [paneTarget, setPaneTarget] = useState("");
+  const [codexAuthStatus, setCodexAuthStatus] = useState<CodexAuthStatus | null>(null);
+  const [codexAuthBusy, setCodexAuthBusy] = useState(false);
+  const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
   const [orchestrationBusy, setOrchestrationBusy] = useState<string | null>(null);
   const [orchestrationError, setOrchestrationError] = useState<string | null>(null);
   const [orchestrationResult, setOrchestrationResult] = useState<TmuxCommandResponse | null>(null);
@@ -107,6 +111,38 @@ export default function App() {
     }
   }
 
+  async function refreshCodexStatus(): Promise<CodexAuthStatus | null> {
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      const status = await fetchCodexAuthStatus();
+      setCodexAuthStatus(status);
+      return status;
+    } catch (error) {
+      setCodexAuthStatus(null);
+      setCodexAuthError((error as Error).message);
+      return null;
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  }
+
+  async function ensureCodexAuthPreflight(actionName: string): Promise<void> {
+    const status = await refreshCodexStatus();
+    if (!status) {
+      throw new Error(`Unable to verify Codex auth before ${actionName}`);
+    }
+    if (!status.available) {
+      throw new Error(
+        `Codex CLI not available. Install Codex CLI or set TRACE_CODEX_BIN. stderr=${status.stderr}`,
+      );
+    }
+    if (!status.logged_in) {
+      const command = status.login_commands[0] ?? "codex login";
+      throw new Error(`Codex auth required before ${actionName}. Run: ${command}`);
+    }
+  }
+
   return (
     <main style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", padding: 20 }}>
       <h1>TRACE Phase 0 Scaffold</h1>
@@ -114,6 +150,17 @@ export default function App() {
       <section>
         <h2>Orchestration</h2>
         <p>Control tmux session lifecycle through TRACE API orchestration routes.</p>
+        <p>
+          <button onClick={() => void refreshCodexStatus()} disabled={codexAuthBusy}>
+            Check Codex Auth
+          </button>
+        </p>
+        {codexAuthBusy ? <p>Checking Codex auth...</p> : null}
+        {codexAuthError ? <p>Codex auth check failed: {codexAuthError}</p> : null}
+        {codexAuthStatus ? <pre>{JSON.stringify(codexAuthStatus, null, 2)}</pre> : null}
+        {codexAuthStatus?.requires_login ? (
+          <p>Run one of: {codexAuthStatus.login_commands.join(" | ")}</p>
+        ) : null}
         <fieldset disabled={Boolean(orchestrationBusy)}>
           <label>
             Session:
@@ -229,8 +276,9 @@ export default function App() {
           </button>{" "}
           <button
             onClick={() =>
-              runOrchestrationAction("add-lane", () =>
-                postTmuxAddLane({
+              runOrchestrationAction("add-lane", async () => {
+                await ensureCodexAuthPreflight("add-lane");
+                return postTmuxAddLane({
                   session: optionalValue(session),
                   lane_name: laneName.trim(),
                   profile: optionalValue(laneProfile),
@@ -238,17 +286,18 @@ export default function App() {
                   wait_for_runner: laneMode === "runner" ? laneWaitForRunner : undefined,
                   runner_timeout_sec:
                     laneMode === "runner" ? optionalPositiveInt(laneRunnerTimeoutSec) : undefined,
-                }),
-              )
+                });
+              })
             }
-            disabled={Boolean(orchestrationBusy)}
+            disabled={Boolean(orchestrationBusy) || codexAuthBusy}
           >
             Add Lane
           </button>{" "}
           <button
             onClick={() =>
-              runOrchestrationAction("add-pane", () =>
-                postTmuxAddPane({
+              runOrchestrationAction("add-pane", async () => {
+                await ensureCodexAuthPreflight("add-pane");
+                return postTmuxAddPane({
                   session: optionalValue(session),
                   lane_name: paneLaneName.trim(),
                   profile: optionalValue(paneProfile),
@@ -257,10 +306,10 @@ export default function App() {
                   wait_for_runner: paneMode === "runner" ? paneWaitForRunner : undefined,
                   runner_timeout_sec:
                     paneMode === "runner" ? optionalPositiveInt(paneRunnerTimeoutSec) : undefined,
-                }),
-              )
+                });
+              })
             }
-            disabled={Boolean(orchestrationBusy)}
+            disabled={Boolean(orchestrationBusy) || codexAuthBusy}
           >
             Add Pane
           </button>{" "}

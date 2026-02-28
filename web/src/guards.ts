@@ -1,10 +1,12 @@
 import {
   candidateSummarySchema,
+  codexAuthStatusSchema,
   outputChunkSchema,
   taskResponseSchema,
   tmuxCommandResponseSchema,
   timelineEventSchema,
   type CandidateSummary,
+  type CodexAuthStatus,
   type OutputChunk,
   type TaskResponse,
   type TmuxCommandResponse,
@@ -22,6 +24,7 @@ const timelineListSchema = timelineEventSchema.array();
 const candidateListSchema = candidateSummarySchema.array();
 const outputListSchema = outputChunkSchema.array();
 const tmuxCommandSchema = tmuxCommandResponseSchema;
+const codexAuthStatusGuard = codexAuthStatusSchema;
 
 export function parseTaskResponse(raw: unknown): TaskResponse {
   return taskResponseSchema.parse(raw);
@@ -45,6 +48,10 @@ export function parseOutput(raw: unknown): OutputChunk[] {
 
 export function parseTmuxCommandResponse(raw: unknown): TmuxCommandResponse {
   return tmuxCommandSchema.parse(raw);
+}
+
+export function parseCodexAuthStatus(raw: unknown): CodexAuthStatus {
+  return codexAuthStatusGuard.parse(raw);
 }
 
 export function filterCandidates(

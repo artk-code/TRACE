@@ -49,6 +49,7 @@ const DEFAULT_CORS_ALLOWED_ORIGINS: [&str; 4] = [
 ];
 const DEFAULT_TMUX_SESSION: &str = "trace-smoke";
 const DEFAULT_TMUX_SCRIPT_PATH: &str = "scripts/trace-smoke-tmux.sh";
+const DEFAULT_CODEX_BIN: &str = "codex";
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -495,6 +496,7 @@ struct ApiState {
     replay_store: ReplayCheckpointStore,
     writer_lock: Arc<Mutex<()>>,
     tmux_script_path: PathBuf,
+    codex_bin_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -621,6 +623,19 @@ struct TmuxCommandResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct CodexAuthStatusResponse {
+    command: String,
+    available: bool,
+    logged_in: bool,
+    method: Option<String>,
+    requires_login: bool,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    login_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct BenchmarkSummary {
     total_tasks: usize,
     total_runs: usize,
@@ -683,12 +698,14 @@ pub fn app_router(
     replay_store: ReplayCheckpointStore,
 ) -> Router {
     let tmux_script_path = resolve_tmux_script_path();
+    let codex_bin_path = resolve_codex_bin_path();
     app_router_with_tmux_script(
         api,
         event_store,
         lease_store,
         replay_store,
         tmux_script_path,
+        codex_bin_path,
     )
 }
 
@@ -698,6 +715,7 @@ fn app_router_with_tmux_script(
     lease_store: LeaseIndexStore,
     replay_store: ReplayCheckpointStore,
     tmux_script_path: PathBuf,
+    codex_bin_path: PathBuf,
 ) -> Router {
     let state = ApiState {
         api: Arc::new(RwLock::new(api)),
@@ -706,6 +724,7 @@ fn app_router_with_tmux_script(
         replay_store,
         writer_lock: Arc::new(Mutex::new(())),
         tmux_script_path,
+        codex_bin_path,
     };
 
     Router::new()
@@ -737,6 +756,10 @@ fn app_router_with_tmux_script(
         .route(
             "/benchmarks/evaluate",
             post(post_benchmark_evaluate_handler),
+        )
+        .route(
+            "/orchestrator/auth/codex/status",
+            get(get_codex_auth_status_handler),
         )
         .route("/orchestrator/tmux/start", post(post_tmux_start_handler))
         .route("/orchestrator/tmux/status", post(post_tmux_status_handler))
@@ -810,6 +833,15 @@ fn resolve_tmux_script_path() -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_TMUX_SCRIPT_PATH))
+}
+
+fn resolve_codex_bin_path() -> PathBuf {
+    std::env::var("TRACE_CODEX_BIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CODEX_BIN))
 }
 
 fn validate_tmux_session(
@@ -941,6 +973,106 @@ async fn execute_tmux_script(
     args: Vec<String>,
 ) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
     execute_tmux_script_result(state, args).await.map(Json)
+}
+
+async fn execute_codex_login_status(state: &ApiState) -> CodexAuthStatusResponse {
+    let codex_bin_path = state.codex_bin_path.clone();
+    let command = format!("{} login status", codex_bin_path.display());
+    let login_commands = codex_login_commands(&codex_bin_path);
+
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(&codex_bin_path)
+            .args(["login", "status"])
+            .output()
+    })
+    .await;
+
+    match output {
+        Err(error) => CodexAuthStatusResponse {
+            command,
+            available: false,
+            logged_in: false,
+            method: None,
+            requires_login: true,
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: format!("failed to join codex auth status command: {error}"),
+            login_commands,
+        },
+        Ok(Err(error)) => {
+            let exit_code = if error.kind() == std::io::ErrorKind::NotFound {
+                127
+            } else {
+                -1
+            };
+            CodexAuthStatusResponse {
+                command,
+                available: false,
+                logged_in: false,
+                method: None,
+                requires_login: true,
+                exit_code,
+                stdout: String::new(),
+                stderr: format!("failed to execute codex auth status command: {error}"),
+                login_commands,
+            }
+        }
+        Ok(Ok(output)) => {
+            let exit_code = output.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let status_text = if stderr.is_empty() {
+                stdout.clone()
+            } else if stdout.is_empty() {
+                stderr.clone()
+            } else {
+                format!("{stdout}\n{stderr}")
+            };
+            let method = parse_codex_login_method(&status_text);
+            let status_text_lower = status_text.to_ascii_lowercase();
+            let logged_in = output.status.success()
+                && !status_text_lower.contains("not logged in")
+                && !status_text_lower.contains("logged out");
+
+            CodexAuthStatusResponse {
+                command,
+                available: true,
+                logged_in,
+                method,
+                requires_login: !logged_in,
+                exit_code,
+                stdout,
+                stderr,
+                login_commands,
+            }
+        }
+    }
+}
+
+fn codex_login_commands(codex_bin_path: &Path) -> Vec<String> {
+    let codex_bin = codex_bin_path.display().to_string();
+    vec![
+        format!("{codex_bin} login"),
+        format!("{codex_bin} login --device-auth"),
+        format!("printenv OPENAI_API_KEY | {codex_bin} login --with-api-key"),
+    ]
+}
+
+fn parse_codex_login_method(stdout: &str) -> Option<String> {
+    let normalized = stdout.to_ascii_lowercase();
+    if normalized.contains("chatgpt") {
+        Some("chatgpt".to_string())
+    } else if normalized.contains("api key") {
+        Some("api_key".to_string())
+    } else {
+        None
+    }
+}
+
+async fn get_codex_auth_status_handler(
+    State(state): State<ApiState>,
+) -> Json<CodexAuthStatusResponse> {
+    Json(execute_codex_login_status(&state).await)
 }
 
 async fn post_tmux_start_handler(
@@ -2091,13 +2223,32 @@ mod tests {
     }
 
     fn build_test_app(root: &std::path::Path, store: &EventStore) -> axum::Router {
-        build_test_app_with_tmux_script(root, store, PathBuf::from("scripts/trace-smoke-tmux.sh"))
+        build_test_app_with_orchestration_bins(
+            root,
+            store,
+            PathBuf::from("scripts/trace-smoke-tmux.sh"),
+            PathBuf::from("codex"),
+        )
     }
 
     fn build_test_app_with_tmux_script(
         root: &std::path::Path,
         store: &EventStore,
         tmux_script_path: PathBuf,
+    ) -> axum::Router {
+        build_test_app_with_orchestration_bins(
+            root,
+            store,
+            tmux_script_path,
+            PathBuf::from("codex"),
+        )
+    }
+
+    fn build_test_app_with_orchestration_bins(
+        root: &std::path::Path,
+        store: &EventStore,
+        tmux_script_path: PathBuf,
+        codex_bin_path: PathBuf,
     ) -> axum::Router {
         let api = TraceApi::from_store(store).expect("projection should build");
         let lease_store = LeaseIndexStore::new(root).expect("lease store should initialize");
@@ -2120,6 +2271,7 @@ mod tests {
             lease_store,
             replay_store,
             tmux_script_path,
+            codex_bin_path,
         )
     }
 
@@ -2562,6 +2714,89 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("session missing"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_codex_auth_status_reports_chatgpt_login() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let tmux_script_path = root.join("tmux-unused.sh");
+        write_executable_script(&tmux_script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let codex_script_path = root.join("codex-mock.sh");
+        write_executable_script(
+            &codex_script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == \"login status\" ]]; then\n  echo \"Logged in using ChatGPT\"\n  exit 0\nfi\necho \"unexpected args: $*\" >&2\nexit 2\n",
+        );
+        let app = build_test_app_with_orchestration_bins(
+            &root,
+            &store,
+            tmux_script_path,
+            codex_script_path.clone(),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/auth/codex/status")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["available"].as_bool(), Some(true));
+        assert_eq!(parsed["logged_in"].as_bool(), Some(true));
+        assert_eq!(parsed["method"].as_str(), Some("chatgpt"));
+        assert_eq!(parsed["requires_login"].as_bool(), Some(false));
+        assert_eq!(parsed["exit_code"].as_i64(), Some(0));
+        let expected_command = format!("{} login status", codex_script_path.display());
+        assert_eq!(parsed["command"].as_str(), Some(expected_command.as_str()));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_codex_auth_status_reports_missing_binary() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let tmux_script_path = root.join("tmux-unused.sh");
+        write_executable_script(&tmux_script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let missing_codex = root.join("missing-codex-bin");
+        let app =
+            build_test_app_with_orchestration_bins(&root, &store, tmux_script_path, missing_codex);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/auth/codex/status")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["available"].as_bool(), Some(false));
+        assert_eq!(parsed["logged_in"].as_bool(), Some(false));
+        assert_eq!(parsed["requires_login"].as_bool(), Some(true));
+        assert_eq!(parsed["exit_code"].as_i64(), Some(127));
+        assert!(parsed["stderr"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to execute codex auth status command"));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

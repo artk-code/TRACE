@@ -11,29 +11,36 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
 2. Backend tmux orchestration control plane is implemented:
    - `POST /orchestrator/tmux/start|status|add-lane|add-pane|stop`
 3. Web UI has tmux orchestration controls wired to backend APIs.
-4. Core write-path fencing is in place:
+4. Codex auth preflight endpoint is implemented:
+   - `GET /orchestrator/auth/codex/status`
+5. Web UI can run auth preflight and blocks lane spawn if Codex auth is missing.
+6. Core write-path fencing is in place:
    - lock-safe event append
    - lease epoch/holder validation for typed write routes
-5. Scripted lane runner mode is available:
+7. Scripted lane runner mode is available:
    - tmux add-lane/add-pane accept `mode=interactive|runner`
    - runner mode emits claim/run/output/candidate/verdict/release automatically
 
 ## Execution Sequence
-1. Smoke workflow endpoint.
+1. Auth preflight hardening.
+   - Add backend policy toggle for required Codex auth on `add-lane`/`add-pane`.
+   - Keep endpoint-driven remediation details (`codex login`, `--device-auth`, API key login).
+2. Smoke workflow endpoint.
    - Add API workflow to launch/coordinate Flash/High/Extra runner lanes for a predefined task pack.
    - Return workflow/job state for UI polling.
-2. Benchmark report retrieval APIs.
+3. Benchmark report retrieval APIs.
    - Add list/get endpoints for report artifacts under `.trace/reports`.
    - Keep report ID sanitization and root scoping safeguards.
-3. Web smoke dashboard.
+4. Web smoke dashboard.
    - Add "Run Smoke" + "Evaluate" controls.
    - Render report summary table (per model pass/fail, durations, stale/disqualified counts).
-4. Browser E2E harness.
+5. Browser E2E harness.
    - Add Playwright smoke that verifies:
+     - Codex auth preflight visible and required for lane spawn
      - tmux start/status from UI
      - smoke run triggers event writes
      - benchmark report appears in UI
-5. CI gate.
+6. CI gate.
    - Run Rust + web regression + Playwright smoke.
    - Fail build on smoke regression.
 

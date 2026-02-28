@@ -72,9 +72,24 @@ export const tmuxCommandResponseSchema = z
   })
   .strict();
 
+export const codexAuthStatusSchema = z
+  .object({
+    command: z.string(),
+    available: z.boolean(),
+    logged_in: z.boolean(),
+    method: z.string().optional().nullable(),
+    requires_login: z.boolean(),
+    exit_code: z.number().int(),
+    stdout: z.string(),
+    stderr: z.string(),
+    login_commands: z.array(z.string()),
+  })
+  .strict();
+
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 export type TaskResponse = z.infer<typeof taskResponseSchema>;
 export type TimelineEvent = z.infer<typeof timelineEventSchema>;
 export type CandidateSummary = z.infer<typeof candidateSummarySchema>;
 export type OutputChunk = z.infer<typeof outputChunkSchema>;
 export type TmuxCommandResponse = z.infer<typeof tmuxCommandResponseSchema>;
+export type CodexAuthStatus = z.infer<typeof codexAuthStatusSchema>;

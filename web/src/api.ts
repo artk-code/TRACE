@@ -1,5 +1,6 @@
 import type {
   CandidateSummary,
+  CodexAuthStatus,
   OutputChunk,
   TaskResponse,
   TimelineEvent,
@@ -7,6 +8,7 @@ import type {
 } from "./contracts";
 import {
   parseCandidates,
+  parseCodexAuthStatus,
   parseOutput,
   parseTaskList,
   parseTaskResponse,
@@ -148,4 +150,9 @@ export async function postTmuxAddPane(request: TmuxAddPaneRequest): Promise<Tmux
 export async function postTmuxStop(request: TmuxSessionRequest): Promise<TmuxCommandResponse> {
   const raw = await postJson("/orchestrator/tmux/stop", request);
   return parseTmuxCommandResponse(raw);
+}
+
+export async function fetchCodexAuthStatus(): Promise<CodexAuthStatus> {
+  const raw = await getJson("/orchestrator/auth/codex/status");
+  return parseCodexAuthStatus(raw);
 }
