@@ -2,10 +2,12 @@ import {
   candidateSummarySchema,
   outputChunkSchema,
   taskResponseSchema,
+  tmuxCommandResponseSchema,
   timelineEventSchema,
   type CandidateSummary,
   type OutputChunk,
   type TaskResponse,
+  type TmuxCommandResponse,
   type TimelineEvent,
 } from "./contracts";
 
@@ -19,6 +21,7 @@ const taskListSchema = taskResponseSchema.array();
 const timelineListSchema = timelineEventSchema.array();
 const candidateListSchema = candidateSummarySchema.array();
 const outputListSchema = outputChunkSchema.array();
+const tmuxCommandSchema = tmuxCommandResponseSchema;
 
 export function parseTaskResponse(raw: unknown): TaskResponse {
   return taskResponseSchema.parse(raw);
@@ -38,6 +41,10 @@ export function parseCandidates(raw: unknown): CandidateSummary[] {
 
 export function parseOutput(raw: unknown): OutputChunk[] {
   return outputListSchema.parse(raw);
+}
+
+export function parseTmuxCommandResponse(raw: unknown): TmuxCommandResponse {
+  return tmuxCommandSchema.parse(raw);
 }
 
 export function filterCandidates(

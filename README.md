@@ -16,18 +16,75 @@ TRACE is a *local-first* harness that binds agent work to tasks, records immutab
 - Frontend package lives in `/Users/artk/Documents/GitHub/TRACE/web`.
 - Canonical event log path is `.trace/events/events.jsonl`.
 
-## Build + Test
-1. Backend tests:
+## Ubuntu LTS Build Guide (22.04/24.04)
+1. Install OS packages:
 ```bash
-cargo test --workspace
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev curl git tmux jq ca-certificates
 ```
-2. Web tests:
+2. Install Rust toolchain (`rustup` + stable):
 ```bash
-pnpm --dir web install
+curl https://sh.rustup.rs -sSf | sh -s -- -y
+source "$HOME/.cargo/env"
+rustup toolchain install stable
+rustup default stable
+```
+3. Install Node.js 20 LTS + pnpm:
+```bash
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+corepack enable
+corepack prepare pnpm@9 --activate
+```
+4. Install workspace dependencies:
+```bash
+cd /Users/artk/Documents/GitHub/TRACE
+pnpm install
+```
+
+## Build + Test
+1. Rust workspace regression:
+```bash
+rustup run stable cargo test --workspace
+```
+2. Web regression:
+```bash
 pnpm --dir web test
+pnpm --dir web build
+```
+
+## Local Run (Server + Web)
+1. Start TRACE server:
+```bash
+TRACE_SERVER_ADDR=127.0.0.1:18086 TRACE_ROOT=/tmp/trace-web-smoke cargo run -p trace-server
+```
+2. In another terminal, run web UI:
+```bash
+VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0.1 --port 4173
+```
+3. Open `http://127.0.0.1:4173` and use the **Orchestration** section:
+   - `Start Session`
+   - `Status`
+   - `Add Lane` / `Add Pane`
+   - `Stop Session`
+
+## API Smoke (No Browser)
+```bash
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/start \
+  -H 'content-type: application/json' \
+  -d '{"session":"trace-web-smoke","trace_root":"/tmp/trace-web-smoke","addr":"127.0.0.1:18086"}'
+
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/status \
+  -H 'content-type: application/json' \
+  -d '{"session":"trace-web-smoke"}'
+
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/stop \
+  -H 'content-type: application/json' \
+  -d '{"session":"trace-web-smoke"}'
 ```
 
 ## Current Status
 - Monorepo scaffold is in place (Rust + TypeScript workspace).
 - Read-side API projections from canonical event log are implemented.
-- Next milestone is multi-writer support and benchmark smoke flow (see active plans).
+- tmux orchestration routes are implemented in backend and wired into web UI controls.
+- Next milestone is full multi-agent smoke benchmark/eval flow (see active plans).

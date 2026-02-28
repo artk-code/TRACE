@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeOutputChunk, parseTaskResponse } from "./guards";
+import { decodeOutputChunk, parseTaskResponse, parseTmuxCommandResponse } from "./guards";
 
 describe("task_response_guard_accepts_nested_shape", () => {
   it("accepts nested TaskResponse shape", () => {
@@ -61,5 +61,29 @@ describe("output_decoder_handles_utf8_and_base64_with_limits", () => {
         3,
       ),
     ).toThrow();
+  });
+});
+
+describe("tmux_command_response_guard", () => {
+  it("accepts orchestration command response shape", () => {
+    const payload = {
+      command: "scripts/trace-smoke-tmux.sh --session trace-smoke status",
+      exit_code: 0,
+      stdout: "windows:\n...",
+      stderr: "",
+    };
+
+    expect(parseTmuxCommandResponse(payload).exit_code).toBe(0);
+  });
+
+  it("rejects invalid orchestration command response shape", () => {
+    const payload = {
+      command: "scripts/trace-smoke-tmux.sh --session trace-smoke status",
+      exit_code: "0",
+      stdout: "windows:\n...",
+      stderr: "",
+    };
+
+    expect(() => parseTmuxCommandResponse(payload)).toThrow();
   });
 });
