@@ -17,10 +17,10 @@ Run multiple Codex lanes (Flash, High, Extra) against one TRACE server and drive
   - latency and completion stats
   - stale/disqualified candidate counts
 
-## Confirmed Blockers (2026-02-28)
+## Confirmed Blockers (2026-02-28, Post-Step-2)
+- Resolved: local web-to-API connectivity now has backend CORS contract and regression coverage.
+- Resolved: backend orchestration API route surface now exists for tmux control endpoints.
 - Web app currently has no orchestration or write actions.
-- Local web-to-API smoke connectivity is not standardized yet (proxy/CORS path not locked).
-- Orchestration API route surface is missing (backend has no tmux control endpoints).
 - Lane execution remains manual in pane shells.
 - Report retrieval/list endpoints for UI are missing.
 - Deterministic evaluator task pack/scoring is not yet implemented.
@@ -38,8 +38,9 @@ Run multiple Codex lanes (Flash, High, Extra) against one TRACE server and drive
 - Deterministic evaluator harness for seeded tasks.
 
 ## Milestones
-1. M0: Connectivity and control plane.
-  - Web can call API and orchestration endpoints from dev UI.
+1. M0: Connectivity and backend control plane.
+  - Backend CORS + tmux control routes are implemented.
+  - Remaining gap: web UI/client is not wired to those endpoints yet.
 2. M1: Scripted lanes.
   - One-click smoke run spawns Flash/High/Extra lanes and writes events.
 3. M2: Report UX.

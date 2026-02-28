@@ -8,12 +8,12 @@ Move from read-focused scaffold + manual tmux orchestration to a web-driven smok
 
 ## Sequence
 1. Web/API transport contract.
-  - Lock local-dev connectivity strategy (Vite proxy or CORS).
-  - Add a regression check for browser-origin calls.
+  - Lock local-dev connectivity strategy (Vite proxy or CORS). ✅ (CORS landed)
+  - Add a regression check for browser-origin calls. ✅
 2. Orchestration control-plane routes.
   - Add backend endpoints for tmux session lifecycle:
-    - start/status/add-lane/add-pane/stop.
-  - Enforce input validation for session/lane/profile/target.
+    - start/status/add-lane/add-pane/stop. ✅
+  - Enforce input validation for session/lane/profile/target. ✅
 3. Scripted lane runner mode.
   - Keep interactive mode for humans.
   - Add non-interactive lane mode for smoke automation.
@@ -31,8 +31,7 @@ Move from read-focused scaffold + manual tmux orchestration to a web-driven smok
   - Gate CI on that smoke flow.
 
 ## Blocking Risks
-- Browser/API mismatch blocks all web orchestration.
-- Orchestration routes can become unsafe if session/lane inputs are not constrained.
+- Web UI/client may drift from backend orchestration contracts if not wired with typed requests.
 - Scripted lane mode can race or mis-sequence writes if not fenced by lease checks.
 - Benchmark report remains non-authoritative until deterministic evaluator ships.
 - Web smoke can be flaky in CI without stable process lifecycle + cleanup.

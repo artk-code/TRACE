@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -46,6 +47,8 @@ const DEFAULT_CORS_ALLOWED_ORIGINS: [&str; 4] = [
     "http://localhost:4173",
     "http://127.0.0.1:4173",
 ];
+const DEFAULT_TMUX_SESSION: &str = "trace-smoke";
+const DEFAULT_TMUX_SCRIPT_PATH: &str = "scripts/trace-smoke-tmux.sh";
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -491,6 +494,7 @@ struct ApiState {
     lease_store: LeaseIndexStore,
     replay_store: ReplayCheckpointStore,
     writer_lock: Arc<Mutex<()>>,
+    tmux_script_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,6 +575,45 @@ struct BenchmarkEvaluateResponse {
     summary: BenchmarkSummary,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TmuxStartRequest {
+    session: Option<String>,
+    trace_root: Option<String>,
+    addr: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TmuxSessionRequest {
+    session: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TmuxAddLaneRequest {
+    session: Option<String>,
+    lane_name: String,
+    profile: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TmuxAddPaneRequest {
+    session: Option<String>,
+    lane_name: String,
+    profile: Option<String>,
+    target: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TmuxCommandResponse {
+    command: String,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
 #[derive(Debug, Serialize)]
 struct BenchmarkSummary {
     total_tasks: usize,
@@ -633,12 +676,30 @@ pub fn app_router(
     lease_store: LeaseIndexStore,
     replay_store: ReplayCheckpointStore,
 ) -> Router {
+    let tmux_script_path = resolve_tmux_script_path();
+    app_router_with_tmux_script(
+        api,
+        event_store,
+        lease_store,
+        replay_store,
+        tmux_script_path,
+    )
+}
+
+fn app_router_with_tmux_script(
+    api: TraceApi,
+    event_store: EventStore,
+    lease_store: LeaseIndexStore,
+    replay_store: ReplayCheckpointStore,
+    tmux_script_path: PathBuf,
+) -> Router {
     let state = ApiState {
         api: Arc::new(RwLock::new(api)),
         event_store,
         lease_store,
         replay_store,
         writer_lock: Arc::new(Mutex::new(())),
+        tmux_script_path,
     };
 
     Router::new()
@@ -671,6 +732,17 @@ pub fn app_router(
             "/benchmarks/evaluate",
             post(post_benchmark_evaluate_handler),
         )
+        .route("/orchestrator/tmux/start", post(post_tmux_start_handler))
+        .route("/orchestrator/tmux/status", post(post_tmux_status_handler))
+        .route(
+            "/orchestrator/tmux/add-lane",
+            post(post_tmux_add_lane_handler),
+        )
+        .route(
+            "/orchestrator/tmux/add-pane",
+            post(post_tmux_add_pane_handler),
+        )
+        .route("/orchestrator/tmux/stop", post(post_tmux_stop_handler))
         .with_state(state)
         .layer(cors_layer())
 }
@@ -723,6 +795,214 @@ fn default_cors_origins() -> Vec<HeaderValue> {
         .iter()
         .filter_map(|value| HeaderValue::from_str(value).ok())
         .collect()
+}
+
+fn resolve_tmux_script_path() -> PathBuf {
+    std::env::var("TRACE_TMUX_ORCH_SCRIPT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_TMUX_SCRIPT_PATH))
+}
+
+fn validate_tmux_session(
+    session: Option<String>,
+) -> Result<String, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = session.unwrap_or_else(|| DEFAULT_TMUX_SESSION.to_string());
+    validate_tmux_token("session", &session)?;
+    Ok(session)
+}
+
+fn validate_tmux_token(
+    field: &str,
+    value: &str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if value.is_empty() {
+        return Err(bad_request_error(format!("{field} cannot be empty")));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(bad_request_error(format!(
+            "{field} contains invalid characters; allowed: [A-Za-z0-9._-]"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_tmux_target(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if value.is_empty() {
+        return Err(bad_request_error("target cannot be empty"));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '%'))
+    {
+        return Err(bad_request_error(
+            "target contains invalid characters; allowed: [A-Za-z0-9._:-%]",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_trace_root(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if value.is_empty() {
+        return Err(bad_request_error("trace_root cannot be empty"));
+    }
+    if value.contains('\0') || value.contains('\n') || value.contains('\r') {
+        return Err(bad_request_error("trace_root contains invalid characters"));
+    }
+    Ok(())
+}
+
+fn validate_trace_server_addr(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    value
+        .parse::<SocketAddr>()
+        .map(|_| ())
+        .map_err(|_| bad_request_error("addr must be a valid socket address like 127.0.0.1:18080"))
+}
+
+async fn execute_tmux_script(
+    state: &ApiState,
+    args: Vec<String>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let script_path = state.tmux_script_path.clone();
+    let command = format!("{} {}", script_path.display(), args.join(" "));
+    let command_args = args.clone();
+
+    let output =
+        tokio::task::spawn_blocking(move || Command::new(&script_path).args(command_args).output())
+            .await
+            .map_err(|error| internal_error(format!("failed to join tmux command task: {error}")))?
+            .map_err(|error| internal_error(format!("failed to execute tmux command: {error}")))?;
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        let status = match exit_code {
+            2 => StatusCode::BAD_REQUEST,
+            1 => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        let detail = if !stderr.is_empty() {
+            stderr.clone()
+        } else if !stdout.is_empty() {
+            stdout.clone()
+        } else {
+            "tmux command failed with no output".to_string()
+        };
+        return Err((
+            status,
+            Json(ApiErrorResponse {
+                error: format!("{command} exited with code {exit_code}: {detail}"),
+            }),
+        ));
+    }
+
+    Ok(Json(TmuxCommandResponse {
+        command,
+        exit_code,
+        stdout,
+        stderr,
+    }))
+}
+
+async fn post_tmux_start_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxStartRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = validate_tmux_session(request.session)?;
+    let mut args = vec!["--session".to_string(), session];
+
+    if let Some(trace_root) = request.trace_root {
+        validate_trace_root(&trace_root)?;
+        args.push("--trace-root".to_string());
+        args.push(trace_root);
+    }
+    if let Some(addr) = request.addr {
+        validate_trace_server_addr(&addr)?;
+        args.push("--addr".to_string());
+        args.push(addr);
+    }
+
+    args.push("start".to_string());
+    args.push("--no-attach".to_string());
+
+    execute_tmux_script(&state, args).await
+}
+
+async fn post_tmux_status_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxSessionRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = validate_tmux_session(request.session)?;
+    execute_tmux_script(
+        &state,
+        vec!["--session".to_string(), session, "status".to_string()],
+    )
+    .await
+}
+
+async fn post_tmux_add_lane_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxAddLaneRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = validate_tmux_session(request.session)?;
+    validate_tmux_token("lane_name", &request.lane_name)?;
+    let profile = request.profile.unwrap_or_else(|| request.lane_name.clone());
+    validate_tmux_token("profile", &profile)?;
+
+    execute_tmux_script(
+        &state,
+        vec![
+            "--session".to_string(),
+            session,
+            "add-lane".to_string(),
+            request.lane_name,
+            profile,
+        ],
+    )
+    .await
+}
+
+async fn post_tmux_add_pane_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxAddPaneRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = validate_tmux_session(request.session)?;
+    validate_tmux_token("lane_name", &request.lane_name)?;
+    let profile = request.profile.unwrap_or_else(|| request.lane_name.clone());
+    validate_tmux_token("profile", &profile)?;
+
+    let mut args = vec![
+        "--session".to_string(),
+        session,
+        "add-pane".to_string(),
+        request.lane_name,
+        profile,
+    ];
+    if let Some(target) = request.target {
+        validate_tmux_target(&target)?;
+        args.push(target);
+    }
+
+    execute_tmux_script(&state, args).await
+}
+
+async fn post_tmux_stop_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxSessionRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = validate_tmux_session(request.session)?;
+    execute_tmux_script(
+        &state,
+        vec!["--session".to_string(), session, "stop".to_string()],
+    )
+    .await
 }
 
 async fn get_tasks_handler(State(state): State<ApiState>) -> Json<Vec<TaskResponse>> {
@@ -1563,6 +1843,9 @@ fn internal_error(message: String) -> (StatusCode, Json<ApiErrorResponse>) {
 mod tests {
     use std::env;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use axum::body::{to_bytes, Body};
@@ -1573,7 +1856,7 @@ mod tests {
     use trace_lease::{LeaseIndexStore, ReplayCheckpointStore};
     use trace_store::EventStore;
 
-    use super::{app_router, bootstrap_runtime, TraceApi, PHASE0_ENDPOINTS};
+    use super::{app_router_with_tmux_script, bootstrap_runtime, TraceApi, PHASE0_ENDPOINTS};
 
     fn unique_temp_root() -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1665,6 +1948,14 @@ mod tests {
     }
 
     fn build_test_app(root: &std::path::Path, store: &EventStore) -> axum::Router {
+        build_test_app_with_tmux_script(root, store, PathBuf::from("scripts/trace-smoke-tmux.sh"))
+    }
+
+    fn build_test_app_with_tmux_script(
+        root: &std::path::Path,
+        store: &EventStore,
+        tmux_script_path: PathBuf,
+    ) -> axum::Router {
         let api = TraceApi::from_store(store).expect("projection should build");
         let lease_store = LeaseIndexStore::new(root).expect("lease store should initialize");
         let replay_store =
@@ -1680,7 +1971,22 @@ mod tests {
             .replay_to_tip(events.last().map(|event| event.global_seq).unwrap_or(0))
             .expect("checkpoint should advance to seeded tip");
 
-        app_router(api, store.clone(), lease_store, replay_store)
+        app_router_with_tmux_script(
+            api,
+            store.clone(),
+            lease_store,
+            replay_store,
+            tmux_script_path,
+        )
+    }
+
+    fn write_executable_script(path: &std::path::Path, content: &str) {
+        fs::write(path, content).expect("script should be written");
+        #[cfg(unix)]
+        {
+            let permissions = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(path, permissions).expect("script should be executable");
+        }
     }
 
     #[test]
@@ -1819,6 +2125,129 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
         assert!(allow_methods.contains("GET"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_start_route_invokes_configured_script_with_expected_args() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let script_path = root.join("tmux-ok.sh");
+        write_executable_script(
+            &script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"started\"\n",
+                args_log_path.display()
+            ),
+        );
+
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/start")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "trace_root": "/tmp/trace-web-test",
+                            "addr": "127.0.0.1:18090"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["exit_code"].as_i64(), Some(0));
+
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("--session trace-web-test"));
+        assert!(logged_args.contains("--trace-root /tmp/trace-web-test"));
+        assert!(logged_args.contains("--addr 127.0.0.1:18090"));
+        assert!(logged_args.contains("start --no-attach"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_add_lane_rejects_invalid_lane_name() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let script_path = root.join("tmux-unused.sh");
+        write_executable_script(&script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/add-lane")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "lane_name": "bad lane",
+                            "profile": "high"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_status_maps_script_exit_code_one_to_conflict() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let script_path = root.join("tmux-fail.sh");
+        write_executable_script(
+            &script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"session missing\" >&2\nexit 1\n",
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/status")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "missing-session"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("session missing"));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
