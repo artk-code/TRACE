@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -50,6 +51,9 @@ const DEFAULT_CORS_ALLOWED_ORIGINS: [&str; 4] = [
 const DEFAULT_TMUX_SESSION: &str = "trace-smoke";
 const DEFAULT_TMUX_SCRIPT_PATH: &str = "scripts/trace-smoke-tmux.sh";
 const DEFAULT_CODEX_BIN: &str = "codex";
+const DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC: u64 = 180;
+const DEFAULT_SMOKE_PROFILES: [&str; 3] = ["flash", "high", "extra"];
+static SMOKE_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexAuthPolicy {
@@ -513,6 +517,8 @@ struct ApiState {
     tmux_script_path: PathBuf,
     codex_bin_path: PathBuf,
     codex_auth_policy: CodexAuthPolicy,
+    smoke_runs: Arc<Mutex<HashMap<String, SmokeRunRecord>>>,
+    active_smoke_sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -585,7 +591,7 @@ struct BenchmarkEvaluateRequest {
     report_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct BenchmarkEvaluateResponse {
     report_id: String,
     json_report_path: String,
@@ -630,6 +636,16 @@ struct TmuxAddPaneRequest {
     runner_timeout_sec: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SmokeRunStartRequest {
+    session: Option<String>,
+    profiles: Option<Vec<String>>,
+    target: Option<String>,
+    runner_timeout_sec: Option<u64>,
+    report_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct TmuxCommandResponse {
     command: String,
@@ -652,12 +668,56 @@ struct CodexAuthStatusResponse {
     login_commands: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct BenchmarkSummary {
     total_tasks: usize,
     total_runs: usize,
     total_events: usize,
     models: Vec<BenchmarkModelSummary>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SmokeRunStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct SmokeRunRecord {
+    run_id: String,
+    status: SmokeRunStatus,
+    created_at: String,
+    updated_at: String,
+    session: String,
+    target: String,
+    profiles: Vec<String>,
+    lane_names: Vec<String>,
+    runner_timeout_sec: u64,
+    current_step: String,
+    error: Option<String>,
+    benchmark: Option<BenchmarkEvaluateResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct SmokeRunResponse {
+    run_id: String,
+    status: SmokeRunStatus,
+    created_at: String,
+    updated_at: String,
+    session: String,
+    target: String,
+    profiles: Vec<String>,
+    lane_names: Vec<String>,
+    runner_timeout_sec: u64,
+    current_step: String,
+    error: Option<String>,
+    report_id: Option<String>,
+    json_report_path: Option<String>,
+    markdown_report_path: Option<String>,
+    summary: Option<BenchmarkSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -746,6 +806,8 @@ fn app_router_with_tmux_script(
         tmux_script_path,
         codex_bin_path,
         codex_auth_policy,
+        smoke_runs: Arc::new(Mutex::new(HashMap::new())),
+        active_smoke_sessions: Arc::new(Mutex::new(HashSet::new())),
     };
 
     Router::new()
@@ -782,6 +844,8 @@ fn app_router_with_tmux_script(
             "/orchestrator/auth/codex/status",
             get(get_codex_auth_status_handler),
         )
+        .route("/smoke/runs", post(post_smoke_run_handler))
+        .route("/smoke/runs/{run_id}", get(get_smoke_run_handler))
         .route("/orchestrator/tmux/start", post(post_tmux_start_handler))
         .route("/orchestrator/tmux/status", post(post_tmux_status_handler))
         .route(
@@ -1149,6 +1213,346 @@ async fn get_codex_auth_status_handler(
     State(state): State<ApiState>,
 ) -> Json<CodexAuthStatusResponse> {
     Json(execute_codex_login_status(&state).await)
+}
+
+fn default_smoke_profiles() -> Vec<String> {
+    DEFAULT_SMOKE_PROFILES
+        .iter()
+        .map(|profile| profile.to_string())
+        .collect()
+}
+
+fn generate_smoke_run_id() -> String {
+    let serial = SMOKE_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("smoke-{epoch_ms}-{serial}")
+}
+
+fn build_smoke_lane_names(run_id: &str, profiles: &[String]) -> Vec<String> {
+    let suffix = run_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let lane_suffix = if suffix.is_empty() {
+        "run".to_string()
+    } else {
+        suffix
+    };
+
+    profiles
+        .iter()
+        .map(|profile| format!("smoke-{profile}-{lane_suffix}"))
+        .collect()
+}
+
+fn smoke_run_response(record: &SmokeRunRecord) -> SmokeRunResponse {
+    let (report_id, json_report_path, markdown_report_path, summary) =
+        if let Some(benchmark) = &record.benchmark {
+            (
+                Some(benchmark.report_id.clone()),
+                Some(benchmark.json_report_path.clone()),
+                Some(benchmark.markdown_report_path.clone()),
+                Some(benchmark.summary.clone()),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
+    SmokeRunResponse {
+        run_id: record.run_id.clone(),
+        status: record.status,
+        created_at: record.created_at.clone(),
+        updated_at: record.updated_at.clone(),
+        session: record.session.clone(),
+        target: record.target.clone(),
+        profiles: record.profiles.clone(),
+        lane_names: record.lane_names.clone(),
+        runner_timeout_sec: record.runner_timeout_sec,
+        current_step: record.current_step.clone(),
+        error: record.error.clone(),
+        report_id,
+        json_report_path,
+        markdown_report_path,
+        summary,
+    }
+}
+
+fn workflow_error_to_string(error: (StatusCode, Json<ApiErrorResponse>)) -> String {
+    let (status, Json(body)) = error;
+    format!("{} {}", status.as_u16(), body.error)
+}
+
+async fn set_smoke_run_running(state: &ApiState, run_id: &str, step: &str) {
+    let mut runs = state.smoke_runs.lock().await;
+    if let Some(record) = runs.get_mut(run_id) {
+        record.status = SmokeRunStatus::Running;
+        record.current_step = step.to_string();
+        record.updated_at = now_utc_rfc3339();
+    }
+}
+
+async fn set_smoke_run_failed(state: &ApiState, run_id: &str, step: &str, error: String) {
+    let mut runs = state.smoke_runs.lock().await;
+    if let Some(record) = runs.get_mut(run_id) {
+        record.status = SmokeRunStatus::Failed;
+        record.current_step = step.to_string();
+        record.error = Some(error);
+        record.updated_at = now_utc_rfc3339();
+    }
+}
+
+async fn set_smoke_run_succeeded(
+    state: &ApiState,
+    run_id: &str,
+    benchmark: BenchmarkEvaluateResponse,
+) {
+    let mut runs = state.smoke_runs.lock().await;
+    if let Some(record) = runs.get_mut(run_id) {
+        record.status = SmokeRunStatus::Succeeded;
+        record.current_step = "completed".to_string();
+        record.error = None;
+        record.updated_at = now_utc_rfc3339();
+        record.benchmark = Some(benchmark);
+    }
+}
+
+fn build_benchmark_response_from_events(
+    event_store: &EventStore,
+    report_id: String,
+    events: &[TraceEvent],
+) -> Result<BenchmarkEvaluateResponse, (StatusCode, Json<ApiErrorResponse>)> {
+    let report = build_benchmark_report(report_id.clone(), events);
+    let root = trace_root_from_event_store(event_store);
+    let reports_dir = root.join(".trace/reports");
+    std::fs::create_dir_all(&reports_dir).map_err(|error| internal_error(error.to_string()))?;
+
+    let json_report_path = reports_dir.join(format!("{report_id}.json"));
+    let markdown_report_path = reports_dir.join(format!("{report_id}.md"));
+
+    let json_report =
+        serde_json::to_string_pretty(&report).map_err(|error| internal_error(error.to_string()))?;
+    std::fs::write(&json_report_path, json_report)
+        .map_err(|error| internal_error(error.to_string()))?;
+    std::fs::write(&markdown_report_path, render_benchmark_markdown(&report))
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(BenchmarkEvaluateResponse {
+        report_id,
+        json_report_path: json_report_path.to_string_lossy().to_string(),
+        markdown_report_path: markdown_report_path.to_string_lossy().to_string(),
+        summary: BenchmarkSummary {
+            total_tasks: report.total_tasks,
+            total_runs: report.total_runs,
+            total_events: report.total_events,
+            models: report.models.clone(),
+        },
+    })
+}
+
+async fn run_smoke_workflow(
+    state: ApiState,
+    run_id: String,
+    session: String,
+    target: String,
+    profiles: Vec<String>,
+    lane_names: Vec<String>,
+    runner_timeout_sec: u64,
+    report_id_override: Option<String>,
+    start_global_seq: u64,
+) {
+    set_smoke_run_running(&state, &run_id, "spawning_lanes").await;
+
+    for (lane_name, profile) in lane_names.iter().zip(profiles.iter()) {
+        if let Err(error) = execute_tmux_script_result(
+            &state,
+            vec![
+                "--session".to_string(),
+                session.clone(),
+                "add-pane".to_string(),
+                lane_name.clone(),
+                profile.clone(),
+                target.clone(),
+                "runner".to_string(),
+            ],
+        )
+        .await
+        {
+            let message = workflow_error_to_string(error);
+            set_smoke_run_failed(&state, &run_id, "spawning_lanes", message).await;
+            let mut active = state.active_smoke_sessions.lock().await;
+            active.remove(&session);
+            return;
+        }
+    }
+
+    set_smoke_run_running(&state, &run_id, "waiting_for_lanes").await;
+    for lane_name in &lane_names {
+        if let Err(error) = execute_tmux_script_result(
+            &state,
+            vec![
+                "--session".to_string(),
+                session.clone(),
+                "wait-lane".to_string(),
+                lane_name.clone(),
+                runner_timeout_sec.to_string(),
+            ],
+        )
+        .await
+        {
+            let message = workflow_error_to_string(error);
+            set_smoke_run_failed(&state, &run_id, "waiting_for_lanes", message).await;
+            let mut active = state.active_smoke_sessions.lock().await;
+            active.remove(&session);
+            return;
+        }
+    }
+
+    set_smoke_run_running(&state, &run_id, "evaluating_benchmark").await;
+    let report_response = (|| {
+        let events = state
+            .event_store
+            .read_all_events()
+            .map_err(|error| internal_error(error.to_string()))?;
+        let scoped_events = events
+            .into_iter()
+            .filter(|event| event.global_seq > start_global_seq)
+            .collect::<Vec<_>>();
+        let report_id = sanitize_report_id(
+            report_id_override
+                .as_deref()
+                .unwrap_or(&format!("smoke-{run_id}")),
+        );
+        build_benchmark_response_from_events(&state.event_store, report_id, &scoped_events)
+    })();
+
+    match report_response {
+        Ok(report) => {
+            set_smoke_run_succeeded(&state, &run_id, report).await;
+        }
+        Err(error) => {
+            let message = workflow_error_to_string(error);
+            set_smoke_run_failed(&state, &run_id, "evaluating_benchmark", message).await;
+        }
+    }
+
+    let mut active = state.active_smoke_sessions.lock().await;
+    active.remove(&session);
+}
+
+async fn post_smoke_run_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<SmokeRunStartRequest>,
+) -> Result<(StatusCode, Json<SmokeRunResponse>), (StatusCode, Json<ApiErrorResponse>)> {
+    let SmokeRunStartRequest {
+        session,
+        profiles,
+        target,
+        runner_timeout_sec,
+        report_id,
+    } = request;
+
+    let session = validate_tmux_session(session)?;
+    let target = target.unwrap_or_else(|| format!("{session}:lanes"));
+    validate_tmux_target(&target)?;
+
+    let profiles = profiles.unwrap_or_else(default_smoke_profiles);
+    if profiles.is_empty() {
+        return Err(bad_request_error("profiles must contain at least one item"));
+    }
+    for profile in &profiles {
+        validate_tmux_token("profile", profile)?;
+    }
+
+    let runner_timeout_sec = runner_timeout_sec.unwrap_or(DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC);
+    validate_runner_timeout(runner_timeout_sec)?;
+    enforce_codex_auth_for_lane_spawn(&state, "smoke-run").await?;
+
+    {
+        let mut active = state.active_smoke_sessions.lock().await;
+        if active.contains(&session) {
+            return Err(conflict_error(format!(
+                "smoke run already active for session {session}"
+            )));
+        }
+        active.insert(session.clone());
+    }
+
+    let start_global_seq = match state.event_store.read_all_events() {
+        Ok(events) => events.last().map(|event| event.global_seq).unwrap_or(0),
+        Err(error) => {
+            let mut active = state.active_smoke_sessions.lock().await;
+            active.remove(&session);
+            return Err(internal_error(error.to_string()));
+        }
+    };
+
+    let run_id = generate_smoke_run_id();
+    let lane_names = build_smoke_lane_names(&run_id, &profiles);
+    let now = now_utc_rfc3339();
+    let record = SmokeRunRecord {
+        run_id: run_id.clone(),
+        status: SmokeRunStatus::Queued,
+        created_at: now.clone(),
+        updated_at: now,
+        session: session.clone(),
+        target: target.clone(),
+        profiles: profiles.clone(),
+        lane_names: lane_names.clone(),
+        runner_timeout_sec,
+        current_step: "queued".to_string(),
+        error: None,
+        benchmark: None,
+    };
+
+    {
+        let mut runs = state.smoke_runs.lock().await;
+        runs.insert(run_id.clone(), record.clone());
+    }
+
+    let workflow_state = state.clone();
+    tokio::spawn(async move {
+        run_smoke_workflow(
+            workflow_state,
+            run_id,
+            session,
+            target,
+            profiles,
+            lane_names,
+            runner_timeout_sec,
+            report_id,
+            start_global_seq,
+        )
+        .await;
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(smoke_run_response(&record))))
+}
+
+async fn get_smoke_run_handler(
+    State(state): State<ApiState>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Result<Json<SmokeRunResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let runs = state.smoke_runs.lock().await;
+    let record = runs
+        .get(&run_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse {
+                    error: format!("smoke run not found: {run_id}"),
+                }),
+            )
+        })?
+        .clone();
+    Ok(Json(smoke_run_response(&record)))
 }
 
 async fn post_tmux_start_handler(
@@ -2147,33 +2551,7 @@ async fn post_benchmark_evaluate_handler(
             .as_secs()
     );
     let report_id = sanitize_report_id(request.report_id.as_deref().unwrap_or(&default_report_id));
-    let report = build_benchmark_report(report_id.clone(), &events);
-
-    let root = trace_root_from_event_store(&state.event_store);
-    let reports_dir = root.join(".trace/reports");
-    std::fs::create_dir_all(&reports_dir).map_err(|error| internal_error(error.to_string()))?;
-
-    let json_report_path = reports_dir.join(format!("{report_id}.json"));
-    let markdown_report_path = reports_dir.join(format!("{report_id}.md"));
-
-    let json_report =
-        serde_json::to_string_pretty(&report).map_err(|error| internal_error(error.to_string()))?;
-    std::fs::write(&json_report_path, json_report)
-        .map_err(|error| internal_error(error.to_string()))?;
-    std::fs::write(&markdown_report_path, render_benchmark_markdown(&report))
-        .map_err(|error| internal_error(error.to_string()))?;
-
-    Ok(Json(BenchmarkEvaluateResponse {
-        report_id,
-        json_report_path: json_report_path.to_string_lossy().to_string(),
-        markdown_report_path: markdown_report_path.to_string_lossy().to_string(),
-        summary: BenchmarkSummary {
-            total_tasks: report.total_tasks,
-            total_runs: report.total_runs,
-            total_events: report.total_events,
-            models: report.models.clone(),
-        },
-    }))
+    build_benchmark_response_from_events(&state.event_store, report_id, &events).map(Json)
 }
 
 fn map_store_error(error: std::io::Error) -> (StatusCode, Json<ApiErrorResponse>) {
@@ -2204,6 +2582,7 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use serde_json::{json, Value};
+    use tokio::time::{sleep, Duration};
     use tower::util::ServiceExt;
     use trace_events::{EventKind, NewTraceEvent};
     use trace_lease::{LeaseIndexStore, ReplayCheckpointStore};
@@ -2388,6 +2767,41 @@ mod tests {
             "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == \"login status\" ]]; then\n  echo \"Logged in using ChatGPT\" >&2\n  exit 0\nfi\necho \"unexpected args: $*\" >&2\nexit 2\n",
         );
         codex_script_path
+    }
+
+    async fn wait_for_smoke_run_terminal(
+        app: &axum::Router,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Value {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/smoke/runs/{run_id}"))
+                        .method("GET")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should succeed");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should read");
+            let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+            let status = parsed["status"].as_str().unwrap_or_default();
+            if status == "succeeded" || status == "failed" {
+                return parsed;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for smoke run to reach terminal state"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[test]
@@ -2609,6 +3023,185 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_smoke_run_workflow_completes_and_writes_report() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let tmux_script_path = root.join("tmux-ok.sh");
+        write_executable_script(
+            &tmux_script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"ok\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, tmux_script_path);
+
+        let start_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(start_response.status(), axum::http::StatusCode::ACCEPTED);
+        let start_body = to_bytes(start_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let start_payload: Value =
+            serde_json::from_slice(&start_body).expect("response should parse");
+        let run_id = start_payload["run_id"]
+            .as_str()
+            .expect("run_id should be present")
+            .to_string();
+        assert_eq!(start_payload["status"].as_str(), Some("queued"));
+
+        let terminal = wait_for_smoke_run_terminal(&app, &run_id, Duration::from_secs(5)).await;
+        assert_eq!(terminal["status"].as_str(), Some("succeeded"));
+        assert_eq!(terminal["current_step"].as_str(), Some("completed"));
+        assert!(terminal["report_id"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("smoke-"));
+
+        let json_report_path = terminal["json_report_path"]
+            .as_str()
+            .expect("json report path should be present");
+        let markdown_report_path = terminal["markdown_report_path"]
+            .as_str()
+            .expect("markdown report path should be present");
+        assert!(std::path::Path::new(json_report_path).exists());
+        assert!(std::path::Path::new(markdown_report_path).exists());
+
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("add-pane smoke-flash-"));
+        assert!(logged_args.contains("add-pane smoke-high-"));
+        assert!(logged_args.contains("add-pane smoke-extra-"));
+        assert!(logged_args.contains("wait-lane smoke-flash-"));
+        assert!(logged_args.contains("wait-lane smoke-high-"));
+        assert!(logged_args.contains("wait-lane smoke-extra-"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_smoke_run_rejects_second_active_run_for_same_session() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let tmux_script_path = root.join("tmux-slow-wait.sh");
+        write_executable_script(
+            &tmux_script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${3:-}\" == \"wait-lane\" ]]; then\n  sleep 0.3\nfi\necho \"ok\"\n",
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, tmux_script_path);
+
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(first_response.status(), axum::http::StatusCode::ACCEPTED);
+        let first_body = to_bytes(first_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let first_payload: Value =
+            serde_json::from_slice(&first_body).expect("response should parse");
+        let run_id = first_payload["run_id"]
+            .as_str()
+            .expect("run_id should be present")
+            .to_string();
+
+        let second_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(second_response.status(), axum::http::StatusCode::CONFLICT);
+        let second_body = to_bytes(second_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let second_payload: Value =
+            serde_json::from_slice(&second_body).expect("response should parse");
+        assert!(second_payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("smoke run already active"));
+
+        let terminal = wait_for_smoke_run_terminal(&app, &run_id, Duration::from_secs(5)).await;
+        assert!(
+            terminal["status"].as_str() == Some("succeeded")
+                || terminal["status"].as_str() == Some("failed")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_smoke_run_returns_not_found_for_unknown_id() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/smoke/runs/unknown-run")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("smoke run not found"));
+
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
