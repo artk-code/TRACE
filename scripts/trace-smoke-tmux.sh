@@ -260,7 +260,7 @@ status_session() {
   tmux list-windows -t "$SESSION"
   echo
   echo "panes:"
-  tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "#{session_name}:#{window_name}.#{pane_index} title=#{pane_title} dead=#{pane_dead} dead_status=#{pane_dead_status} pid=#{pane_pid} cmd=#{pane_current_command}"
+  tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "#{session_name}:#{window_name}.#{pane_index} lane=#{@trace_lane_name} mode=#{@trace_lane_mode} title=#{pane_title} dead=#{pane_dead} dead_status=#{pane_dead_status} pid=#{pane_pid} cmd=#{pane_current_command}"
   echo
   echo "session config:"
   echo "TRACE_ROOT=$(session_env_value TRACE_ROOT || echo "<unset>")"
@@ -358,13 +358,13 @@ wait_lane() {
   while (( SECONDS <= deadline )); do
     local lane_row=""
     lane_row="$(
-      tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "#{pane_id}\t#{pane_title}\t#{pane_dead}\t#{pane_dead_status}" \
-        | awk -F '\t' -v target_title="$lane_title" '$2==target_title {print; exit}'
+      tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "#{pane_id}|#{@trace_lane_name}|#{pane_title}|#{pane_dead}|#{pane_dead_status}" \
+        | awk -F '|' -v target_lane="$lane_name" -v target_title="$lane_title" '$2==target_lane || $3==target_title {print; exit}'
     )"
 
     if [[ -n "$lane_row" ]]; then
-      local pane_id pane_title pane_dead pane_dead_status
-      IFS=$'\t' read -r pane_id pane_title pane_dead pane_dead_status <<<"$lane_row"
+      local pane_id pane_lane pane_title pane_dead pane_dead_status
+      IFS='|' read -r pane_id pane_lane pane_title pane_dead pane_dead_status <<<"$lane_row"
       if [[ "$pane_dead" == "1" ]]; then
         if [[ "$pane_dead_status" == "0" ]]; then
           echo "lane '$lane_name' completed successfully"

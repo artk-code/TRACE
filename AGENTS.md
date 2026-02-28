@@ -127,6 +127,7 @@ Prerequisite:
 - Fixed: `status` pane listing is session-scoped.
 - Fixed: server pane startup falls back to `cargo run -p trace-server` when `rustup stable` fails/unavailable.
 - Fixed: lane runner mode (`mode=runner`) now emits typed write events plus `verdict.recorded` without manual copy/paste.
+- Fixed: `wait-lane` now matches pane metadata (`@trace_lane_name`) with robust delimiter parsing; smoke runner lanes no longer false-timeout.
 - Open: pane command injection can race if commands are blasted without pacing.
 - Open: no autonomous lane lifecycle manager yet.
 
