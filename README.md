@@ -147,4 +147,17 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/stop \
 - Monorepo scaffold is in place (Rust + TypeScript workspace).
 - Read-side API projections from canonical event log are implemented.
 - tmux orchestration routes are implemented in backend and wired into web UI controls.
-- Next milestone is full multi-agent smoke benchmark/eval flow (see active plans).
+- Next milestone is a thin end-to-end smoke slice from one web action to one retrievable report.
+
+## Immediate Blocker-Removal Plan
+1. Add smoke workflow API:
+   - `POST /smoke/runs`
+   - `GET /smoke/runs/{run_id}`
+2. Add report retrieval API:
+   - `GET /reports`
+   - `GET /reports/{report_id}`
+3. Wire minimal web smoke flow:
+   - `Run Smoke`, `Refresh Status`, `View Latest Report`
+4. Add deterministic seeded eval pack so scores are stable.
+5. Add one Playwright smoke test and gate CI on it.
+6. Add merge/PR output pipeline after smoke stability.

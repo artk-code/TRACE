@@ -37,10 +37,10 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Web UI can call tmux orchestration endpoints and display command results/errors.
 
 ## Smoketest Readiness (2026-02-28)
-- Shared-server ingest safety (lock + lease fencing): **80%**
-- Model-vs-model trace capture/report generation: **70%**
-- Web-driven orchestration control surface: **65%**
-- Browser-driven smoke + report UX: **50%**
+- Shared-server ingest safety (lock + lease fencing): **82%**
+- Model-vs-model trace capture/report generation: **74%**
+- Web-driven orchestration control surface: **72%**
+- Browser-driven smoke + report UX: **53%**
 - Deterministic evaluator/scoring: **20%**
 - Merge + PR-capable output pipeline: **15%**
 
@@ -67,18 +67,31 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Smoke workflow API.
-  - One trigger to coordinate multi-lane run lifecycle.
-  - Return status for polling in web UI.
+1. Thin vertical slice (backend smoke run workflow).
+  - Add `POST /smoke/runs` and `GET /smoke/runs/{run_id}`.
+  - Coordinate multi-lane runner lifecycle + benchmark evaluate in one run object.
 2. Report retrieval APIs.
-  - Add report list/get endpoints rooted under `.trace/reports`.
-3. Web smoke/report UX.
-  - Add run/evaluate/report display surfaces in web app.
-4. Browser E2E + CI gate.
-  - Add Playwright smoke test and enforce in CI.
-5. Deterministic evaluator + merge pipeline.
-  - Seed expected-output tasks.
-  - Add scoring contract and merge/PR output path.
+  - Add `GET /reports` and `GET /reports/{report_id}` rooted under `.trace/reports`.
+  - Keep report ID sanitization/root scoping safeguards.
+3. Minimal web smoke flow.
+  - Add `Run Smoke`, `Refresh Status`, `View Latest Report` UI flow.
+  - Poll smoke run status and render summary from report APIs.
+4. Deterministic eval contract.
+  - Add seeded task pack + expected-output scoring contract.
+  - Make benchmark quality signals reproducible across reruns.
+5. Browser E2E + CI gate.
+  - Add Playwright smoke covering auth check, smoke run, report visibility.
+  - Gate CI on this test.
+6. Merge/PR pipeline (after smoke stability).
+  - Add winning/stacked candidate export and Git-compatible PR path.
+
+## Immediate Build Sequence
+1. Implement `POST /smoke/runs` + `GET /smoke/runs/{run_id}`.
+2. Implement `GET /reports` + `GET /reports/{report_id}`.
+3. Wire web controls for run/poll/view report.
+4. Add deterministic seeded eval pack.
+5. Add one stable Playwright smoke and CI gate.
+6. Add merge/PR workflow after smoke is reliable.
 
 ## Tmux Orchestration Runbook (Now)
 Prerequisite:

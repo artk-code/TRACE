@@ -25,25 +25,25 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
    - runner mode emits claim/run/output/candidate/verdict/release automatically
 
 ## Execution Sequence
-1. Smoke workflow endpoint.
-   - Add API workflow to launch/coordinate Flash/High/Extra runner lanes for a predefined task pack.
-   - Return workflow/job state for UI polling.
-2. Benchmark report retrieval APIs.
-   - Add list/get endpoints for report artifacts under `.trace/reports`.
+1. Smoke workflow API (thin vertical slice).
+   - Add `POST /smoke/runs` to trigger a full Flash/High/Extra smoke workflow.
+   - Add `GET /smoke/runs/{run_id}` to expose lifecycle state for polling.
+   - Include benchmark evaluate trigger and generated `report_id` in final run state.
+2. Report retrieval APIs.
+   - Add `GET /reports` (latest-first report metadata).
+   - Add `GET /reports/{report_id}` (report payload for UI rendering).
    - Keep report ID sanitization and root scoping safeguards.
-3. Web smoke dashboard.
-   - Add "Run Smoke" + "Evaluate" controls.
-   - Render report summary table (per model pass/fail, durations, stale/disqualified counts).
-4. Browser E2E harness.
-   - Add Playwright smoke that verifies:
-     - Codex auth preflight visible and required for lane spawn
-     - backend policy enforcement (`required` blocks unauthenticated lane spawn)
-     - tmux start/status from UI
-     - smoke run triggers event writes
-     - benchmark report appears in UI
-5. CI gate.
-   - Run Rust + web regression + Playwright smoke.
-   - Fail build on smoke regression.
+3. Minimal web smoke flow.
+   - Add `Run Smoke`, `Refresh Status`, `View Latest Report`.
+   - Poll `GET /smoke/runs/{run_id}` until terminal status.
+4. Deterministic eval contract.
+   - Add seeded task pack and expected-output checks.
+   - Make benchmark quality outcome reproducible run-to-run.
+5. Browser E2E harness + CI gate.
+   - Add one Playwright smoke validating auth check -> run smoke -> report visible.
+   - Gate CI on that test plus existing Rust/web regressions.
+6. Merge/PR pipeline.
+   - Add winner/stacked-candidate export and Git-compatible PR workflow after smoke path stabilizes.
 
 ## Risks
 - Runner concurrency can race lease transitions if workers are not sequenced per task/epoch.
@@ -57,7 +57,7 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
 - `rustup run stable cargo test --workspace`
 - `pnpm --dir web test`
 - `pnpm --dir web build`
-- `pnpm --dir web test:e2e` (to be added with Playwright)
+- `pnpm --dir web test:e2e` (enabled once Playwright smoke lands)
 
 ## Exit Criteria
 - One web-driven action can run a 3-lane smoke scenario end-to-end.

@@ -7,14 +7,15 @@ Depends on: `AGENTS.md`, `BUILD_SEQUENCE_PLAN_v3.md`
 From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace events on one shared server, and generate a benchmark report that can be reviewed in the same UI.
 
 ## Target Flow (Web-Driven)
-1. Verify Codex auth status (`available=true`, `logged_in=true`) from web.
-2. Start/attach tmux session from web.
-3. Spawn configured lanes from web.
+1. Verify Codex auth status from web.
+   - When `policy=required`, require `available=true` and `logged_in=true`.
+2. Trigger smoke workflow via `POST /smoke/runs`.
+3. Poll `GET /smoke/runs/{run_id}` until terminal state.
 4. Execute scripted lane runners (no manual terminal copy/paste).
 5. Emit typed write events:
    - claim, run start, output, candidate, release
-6. Trigger benchmark evaluation.
-7. Retrieve and render report summary in web.
+6. Trigger benchmark evaluation inside workflow completion path.
+7. Retrieve report via report APIs and render summary in web.
 
 ## What Is Already Landed
 - CORS contract for browser-origin API access.
@@ -28,17 +29,22 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
 - Benchmark generation endpoint (`POST /benchmarks/evaluate`) writing JSON/Markdown artifacts.
 
 ## Confirmed Gaps
-- No coordinated smoke-run job API for multi-lane lifecycle/status.
-- No smoke-run workflow endpoint coordinating lane lifecycle.
-- No report list/get API for UI retrieval.
+- No `POST /smoke/runs` / `GET /smoke/runs/{run_id}` job API yet.
+- No `GET /reports` / `GET /reports/{report_id}` API for UI retrieval.
 - No deterministic task pack + expected scoring contract.
 - No browser E2E suite verifying end-to-end smoke behavior.
 
 ## Milestones
-1. M1: Smoke workflow API (trigger + status).
-2. M2: Report list/get endpoints.
-3. M3: Web report UX (summary + drill-down).
-4. M4: Playwright smoke tests + CI gate.
+1. M1: Smoke workflow API.
+   - `POST /smoke/runs`
+   - `GET /smoke/runs/{run_id}`
+2. M2: Report retrieval APIs.
+   - `GET /reports`
+   - `GET /reports/{report_id}`
+3. M3: Minimal web flow.
+   - Run smoke, poll status, view latest report.
+4. M4: Deterministic evaluator seed pack.
+5. M5: Playwright smoke tests + CI gate.
 
 ## Acceptance Criteria
 - At least 3 lanes can run a web-triggered smoke flow against one server/root.
