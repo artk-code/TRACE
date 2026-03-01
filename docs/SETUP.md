@@ -1,4 +1,4 @@
-# TRACE Linux Build and Test Guide (Human Operators)
+# TRACE Setup Guide (Ubuntu Linux)
 
 Date: 2026-03-01  
 Target OS: Ubuntu 22.04 / 24.04 LTS

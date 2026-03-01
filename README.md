@@ -14,7 +14,7 @@ TRACE is a *local-first* harness that binds agent work to tasks, records immutab
 ## Phase 0 QA Docs
 - [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)
 - [docs/PHASE0_HUMAN_QA.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_HUMAN_QA.md)
-- [docs/LINUX_BUILD_HUMAN.md](/Users/artk/Documents/GitHub/TRACE/docs/LINUX_BUILD_HUMAN.md)
+- [docs/SETUP.md](/Users/artk/Documents/GitHub/TRACE/docs/SETUP.md)
 
 ## Archived Planning Docs
 - [archive/phase0_docs](/Users/artk/Documents/GitHub/TRACE/archive/phase0_docs)
@@ -51,7 +51,7 @@ cd /Users/artk/Documents/GitHub/TRACE
 pnpm install
 ```
 Detailed Ubuntu operator/runbook flow is documented in:
-- [docs/LINUX_BUILD_HUMAN.md](/Users/artk/Documents/GitHub/TRACE/docs/LINUX_BUILD_HUMAN.md)
+- [docs/SETUP.md](/Users/artk/Documents/GitHub/TRACE/docs/SETUP.md)
 
 ## Build + Test
 1. Rust formatting gate:

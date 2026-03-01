@@ -14,7 +14,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 ## Phase 0 QA Docs
 - `docs/PHASE0_SIGNOFF.md`
 - `docs/PHASE0_HUMAN_QA.md`
-- `docs/LINUX_BUILD_HUMAN.md`
+- `docs/SETUP.md`
 
 ## Current Baseline
 - Canonical log + projection pipeline is active.
