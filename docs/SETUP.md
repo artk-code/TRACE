@@ -152,6 +152,8 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/jj/integrate \
   -d '{"base_revset":"trunk()","good_revisions":["good-a","good-b"],"bad_revisions":["bad-a"],"message":"feat: integrate selected agent revisions"}' | jq .
 ```
 
+`integrate` is non-destructive by default. To explicitly abandon bad revisions, pass `"abandon_bad":true`.
+
 6. Trigger and poll agent run:
 ```bash
 RUN_ID="$(curl -sS -X POST http://127.0.0.1:18086/agent/runs \

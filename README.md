@@ -74,6 +74,11 @@ scripts/trace-jj.sh publish agent/codex-a/slice @- origin
 scripts/trace-jj.sh integrate --base trunk() --good good-a --good good-b --bad bad-a --message "feat: integrate selected agent revisions"
 ```
 
+Integration behavior:
+- default integrate is non-destructive to source revisions
+- `--bad` revisions are excluded from composition
+- add `--abandon-bad` only when you explicitly want to delete bad revisions
+
 Full workflow guide:
 - [docs/JJ_MULTIAGENT_WORKFLOW.md](/Users/artk/Documents/GitHub/TRACE/docs/JJ_MULTIAGENT_WORKFLOW.md)
 
@@ -439,8 +444,10 @@ All JJ orchestration routes execute `scripts/trace-jj.sh` (or override with `TRA
   - `good_revisions` required array (min 1, max 16)
   - `bad_revisions` optional array (max 16)
   - `message` optional text (max 4000 chars)
+  - `abandon_bad` optional bool (`false` default; when true, bad revisions are abandoned)
 - Behavior:
   - Runs `scripts/trace-jj.sh integrate --good ...` and composes selected good revisions into one integration change.
+  - Source revisions are preserved by default (non-destructive).
 
 ## API Smoke (No Browser)
 ```bash
@@ -509,7 +516,7 @@ Note:
 - `400 Bad Request` from `POST /orchestrator/tmux/send-keys`:
   - missing input action (`text`/`key`/`press_enter=true`), invalid `key`, or oversized/empty `text`.
 - `400 Bad Request` from `/orchestrator/jj/*` routes:
-  - invalid `lane_name`/`bookmark` token format, empty revset arrays, or invalid control characters.
+  - invalid `lane_name`/`bookmark` token format, empty revset arrays, duplicate integrate entries, overlapping good/bad revisions, or invalid control characters.
 - `409 Conflict` from `/orchestrator/jj/*` routes:
   - script-level command conflict (for example existing workspace destination, publish safety check, or missing remote state).
 - `409 Conflict` mentioning `history limit reached`:
@@ -533,6 +540,7 @@ Note:
   - `POST /orchestrator/tmux/send-keys`
 - jj multi-agent patch helper is implemented:
   - `scripts/trace-jj.sh` (`bootstrap`, `status`, `lane-add`, `lane-list`, `lane-forget`, `lane-root`, `patch`, `publish`, `integrate`)
+  - integrate guardrails: single-revision resolution, non-destructive default composition, optional `--abandon-bad`
 - jj orchestration API routes are implemented:
   - `POST /orchestrator/jj/bootstrap|status|lane-add|lane-list|lane-forget|lane-root|patch|publish|integrate`
 - Smoke workflow API is implemented:

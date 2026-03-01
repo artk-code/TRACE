@@ -41,8 +41,9 @@ Commands:
   publish <bookmark> [revset] [remote]
       Set bookmark to revision (default: @-) and push it (default remote: $DEFAULT_REMOTE).
 
-  integrate [--base <revset>] --good <revset> [--good <revset> ...] [--bad <revset> ...] [--message <text>]
-      Create a new integration change from selected good revisions and optionally abandon bad revisions.
+  integrate [--base <revset>] --good <revset> [--good <revset> ...] [--bad <revset> ...] [--message <text>] [--abandon-bad]
+      Create a non-destructive integration change from selected good revisions.
+      Source revisions are preserved. Use --abandon-bad only when you explicitly want to delete bad revisions.
       Defaults: --base trunk(), --message "feat: integrate selected agent revisions".
 
   help
@@ -104,6 +105,72 @@ warning: jj user identity is not configured. set before publishing:
   jj config set --user user.email "you@example.com"
 EOF
   fi
+}
+
+contains_value() {
+  local needle="$1"
+  shift || true
+  local item
+  for item in "$@"; do
+    if [[ "$item" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_single_change_id() {
+  local field="$1"
+  local revset="$2"
+  local raw
+  local -a ids=()
+  local line
+
+  if ! raw="$(jj log -r "$revset" --no-graph -T 'change_id ++ "\n"' 2>/dev/null)"; then
+    echo "$field did not resolve to a revision: $revset" >&2
+    exit 2
+  fi
+
+  while IFS= read -r line; do
+    if [[ -n "${line// }" ]]; then
+      ids+=("$line")
+    fi
+  done <<<"$raw"
+
+  if [[ ${#ids[@]} -eq 0 ]]; then
+    echo "$field did not resolve to any revision: $revset" >&2
+    exit 2
+  fi
+  if [[ ${#ids[@]} -ne 1 ]]; then
+    echo "$field must resolve to exactly one revision, got ${#ids[@]}: $revset" >&2
+    exit 2
+  fi
+
+  printf '%s\n' "${ids[0]}"
+}
+
+apply_change_patch() {
+  local change_id="$1"
+  local patch_file
+  patch_file="$(mktemp "${TMPDIR:-/tmp}/trace-jj-${change_id}.XXXX.patch")"
+
+  if ! jj diff --git --color never -r "$change_id" >"$patch_file"; then
+    rm -f "$patch_file"
+    echo "failed to export patch for change: $change_id" >&2
+    exit 1
+  fi
+  if ! git apply --check --3way "$patch_file"; then
+    rm -f "$patch_file"
+    echo "patch pre-check failed while applying change: $change_id" >&2
+    exit 1
+  fi
+  if ! git apply --3way "$patch_file"; then
+    rm -f "$patch_file"
+    echo "patch apply failed for change: $change_id" >&2
+    exit 1
+  fi
+
+  rm -f "$patch_file"
 }
 
 bootstrap() {
@@ -250,8 +317,15 @@ integrate_cmd() {
 
   local base_revset="trunk()"
   local message="feat: integrate selected agent revisions"
+  local abandon_bad=false
   local -a good_revsets=()
   local -a bad_revsets=()
+  local -a good_change_ids=()
+  local -a bad_change_ids=()
+  local good_change_id
+  local bad_change_id
+  local base_change_id
+  local integrated_change_id
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -287,9 +361,13 @@ integrate_cmd() {
         message="$2"
         shift 2
         ;;
+      --abandon-bad)
+        abandon_bad=true
+        shift 1
+        ;;
       *)
         echo "unknown integrate option: $1" >&2
-        echo "usage: $0 integrate [--base <revset>] --good <revset> [--good <revset> ...] [--bad <revset> ...] [--message <text>]" >&2
+        echo "usage: $0 integrate [--base <revset>] --good <revset> [--good <revset> ...] [--bad <revset> ...] [--message <text>] [--abandon-bad]" >&2
         exit 2
         ;;
     esac
@@ -300,25 +378,69 @@ integrate_cmd() {
     exit 2
   fi
 
-  jj new "$base_revset" -m "$message"
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git is required for integrate patch application" >&2
+    exit 1
+  fi
+
+  base_change_id="$(resolve_single_change_id "base_revset" "$base_revset")"
+
   for revset in "${good_revsets[@]}"; do
-    jj squash --from "$revset" --into @ --use-destination-message
+    good_change_id="$(resolve_single_change_id "good revision" "$revset")"
+    if [[ "$good_change_id" == "$base_change_id" ]]; then
+      echo "good revision cannot be the same as base: $revset" >&2
+      exit 2
+    fi
+    if contains_value "$good_change_id" "${good_change_ids[@]}"; then
+      echo "duplicate good revision resolved to change: $good_change_id" >&2
+      exit 2
+    fi
+    good_change_ids+=("$good_change_id")
   done
 
-  if [[ ${#bad_revsets[@]} -gt 0 ]]; then
-    jj abandon "${bad_revsets[@]}"
+  for revset in "${bad_revsets[@]}"; do
+    bad_change_id="$(resolve_single_change_id "bad revision" "$revset")"
+    if [[ "$bad_change_id" == "$base_change_id" ]]; then
+      echo "bad revision cannot be the same as base: $revset" >&2
+      exit 2
+    fi
+    if contains_value "$bad_change_id" "${bad_change_ids[@]}"; then
+      echo "duplicate bad revision resolved to change: $bad_change_id" >&2
+      exit 2
+    fi
+    if contains_value "$bad_change_id" "${good_change_ids[@]}"; then
+      echo "same revision appears in both good and bad sets: $bad_change_id" >&2
+      exit 2
+    fi
+    bad_change_ids+=("$bad_change_id")
+  done
+
+  jj new "$base_change_id" -m "$message"
+  for good_change_id in "${good_change_ids[@]}"; do
+    apply_change_patch "$good_change_id"
+  done
+
+  if [[ "$abandon_bad" == "true" && ${#bad_change_ids[@]} -gt 0 ]]; then
+    jj abandon "${bad_change_ids[@]}"
   fi
 
-  local bad_label="none"
-  if [[ ${#bad_revsets[@]} -gt 0 ]]; then
-    bad_label="${bad_revsets[*]}"
+  local bad_label="excluded_only"
+  if [[ "$abandon_bad" == "true" ]]; then
+    bad_label="abandoned"
   fi
+  if [[ ${#bad_change_ids[@]} -eq 0 ]]; then
+    bad_label="none"
+  fi
+
+  integrated_change_id="$(resolve_single_change_id "integration change" "@")"
 
   cat <<EOF
 integration complete:
-  base: $base_revset
-  good: ${good_revsets[*]}
-  bad_abandoned: $bad_label
+  base: $base_change_id
+  integrated_change: $integrated_change_id
+  good_changes: ${good_change_ids[*]}
+  bad_changes: ${bad_change_ids[*]:-none}
+  bad_handling: $bad_label
 
 next:
   jj st

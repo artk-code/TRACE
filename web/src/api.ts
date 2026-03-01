@@ -103,6 +103,7 @@ export type JjIntegrateRequest = {
   good_revisions: string[];
   bad_revisions?: string[];
   message?: string;
+  abandon_bad?: boolean;
 };
 
 export type AgentRunStartRequest = {

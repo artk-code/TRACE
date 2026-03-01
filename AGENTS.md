@@ -177,6 +177,7 @@ Prerequisite:
 - Fixed: web `View Latest Report` flow fetches benchmark reports via `/reports` and renders model summary table.
 - Fixed: tmux workspace snapshot/capture/send-keys APIs provide structured pane browsing + browser-driven pane input.
 - Fixed: Playwright browser smoke (`auth -> run smoke -> report visible`) is now CI-gated.
+- Fixed: JJ integrate flow now enforces duplicate/overlap guards and runs non-destructive composition by default (optional explicit bad-revision abandon).
 - Open: pane command injection can race if commands are blasted without pacing.
 - Open: no autonomous lane lifecycle manager yet.
 

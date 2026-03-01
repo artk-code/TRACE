@@ -99,9 +99,20 @@ scripts/trace-jj.sh integrate \
 
 What this does:
 - creates a new integration change on `--base`
-- squashes each `--good` revision into the integration change
-- abandons each `--bad` revision (optional)
+- applies each `--good` revision patch into the integration working change
+- keeps source revisions intact by default (non-destructive)
+- excludes each `--bad` revision from integration by default
 - keeps a single integration message for the composed change
+
+If you explicitly want to delete bad revisions after integration:
+
+```bash
+scripts/trace-jj.sh integrate \
+  --base trunk() \
+  --good good-a \
+  --bad bad-a \
+  --abandon-bad
+```
 
 Then publish the integration result:
 

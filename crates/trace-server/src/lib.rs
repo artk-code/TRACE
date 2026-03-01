@@ -58,6 +58,8 @@ const DEFAULT_TMUX_CAPTURE_LINES: u64 = 200;
 const MAX_TMUX_CAPTURE_LINES: u64 = 5000;
 const MAX_TMUX_SEND_TEXT_CHARS: usize = 4000;
 const MAX_JJ_MESSAGE_CHARS: usize = 4000;
+const MAX_JJ_REVSET_CHARS: usize = 256;
+const MAX_JJ_PATH_CHARS: usize = 4096;
 const DEFAULT_REPORT_LIST_LIMIT: usize = 50;
 const MAX_REPORT_LIST_LIMIT: usize = 200;
 const MAX_RUNNER_TASK_COUNT: u64 = 50;
@@ -524,6 +526,7 @@ struct ApiState {
     lease_store: LeaseIndexStore,
     replay_store: ReplayCheckpointStore,
     writer_lock: Arc<Mutex<()>>,
+    jj_lock: Arc<Mutex<()>>,
     tmux_script_path: PathBuf,
     jj_script_path: PathBuf,
     codex_bin_path: PathBuf,
@@ -716,6 +719,7 @@ struct JjIntegrateRequest {
     good_revisions: Vec<String>,
     bad_revisions: Option<Vec<String>>,
     message: Option<String>,
+    abandon_bad: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -981,6 +985,7 @@ fn app_router_with_tmux_script(
         lease_store,
         replay_store,
         writer_lock: Arc::new(Mutex::new(())),
+        jj_lock: Arc::new(Mutex::new(())),
         tmux_script_path,
         jj_script_path,
         codex_bin_path,
@@ -1399,14 +1404,26 @@ fn validate_jj_revset(
     field: &str,
     value: &str,
 ) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
-    validate_nonempty_no_control(field, value)
+    validate_nonempty_no_control(field, value)?;
+    if value.len() > MAX_JJ_REVSET_CHARS {
+        return Err(bad_request_error(format!(
+            "{field} exceeds max length ({MAX_JJ_REVSET_CHARS})"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_jj_path_arg(
     field: &str,
     value: &str,
 ) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
-    validate_nonempty_no_control(field, value)
+    validate_nonempty_no_control(field, value)?;
+    if value.len() > MAX_JJ_PATH_CHARS {
+        return Err(bad_request_error(format!(
+            "{field} exceeds max length ({MAX_JJ_PATH_CHARS})"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_jj_message(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
@@ -1452,6 +1469,7 @@ async fn execute_jj_script_result(
     state: &ApiState,
     args: Vec<String>,
 ) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
+    let _jj_guard = state.jj_lock.lock().await;
     execute_script_result_with_trim(state.jj_script_path.clone(), args, true, "jj").await
 }
 
@@ -2817,16 +2835,33 @@ async fn post_jj_integrate_handler(
     if request.good_revisions.len() > 16 {
         return Err(bad_request_error("good_revisions cannot exceed 16 entries"));
     }
+    let mut seen_good = HashSet::new();
     for revset in &request.good_revisions {
         validate_jj_revset("good_revisions", revset)?;
+        if !seen_good.insert(revset.clone()) {
+            return Err(bad_request_error(format!(
+                "duplicate entry in good_revisions: {revset}"
+            )));
+        }
     }
 
     let bad_revisions = request.bad_revisions.unwrap_or_default();
     if bad_revisions.len() > 16 {
         return Err(bad_request_error("bad_revisions cannot exceed 16 entries"));
     }
+    let mut seen_bad = HashSet::new();
     for revset in &bad_revisions {
         validate_jj_revset("bad_revisions", revset)?;
+        if !seen_bad.insert(revset.clone()) {
+            return Err(bad_request_error(format!(
+                "duplicate entry in bad_revisions: {revset}"
+            )));
+        }
+        if seen_good.contains(revset) {
+            return Err(bad_request_error(format!(
+                "revision cannot be both good and bad: {revset}"
+            )));
+        }
     }
 
     let base_revset = request
@@ -2864,6 +2899,9 @@ async fn post_jj_integrate_handler(
     if let Some(message) = message {
         args.push("--message".to_string());
         args.push(message);
+    }
+    if request.abandon_bad.unwrap_or(false) {
+        args.push("--abandon-bad".to_string());
     }
 
     execute_jj_script(&state, args).await
@@ -4473,6 +4511,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_jj_integrate_forwards_abandon_bad_flag() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("jj_args.log");
+        let jj_script_path = root.join("jj-ok.sh");
+        write_executable_script(
+            &jj_script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"integrated\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_jj_script(&root, &store, jj_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/jj/integrate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "good_revisions": ["good-a"],
+                            "bad_revisions": ["bad-a"],
+                            "abandon_bad": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("--abandon-bad"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
     async fn test_jj_integrate_requires_good_revisions() {
         let root = unique_temp_root();
         let store = seed_event_log(&root);
@@ -4489,6 +4568,65 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "good_revisions": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_jj_integrate_rejects_duplicate_good_revisions() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let jj_script_path = root.join("jj-unused.sh");
+        write_executable_script(&jj_script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_jj_script(&root, &store, jj_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/jj/integrate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "good_revisions": ["good-a", "good-a"]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_jj_integrate_rejects_overlap_good_and_bad() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let jj_script_path = root.join("jj-unused.sh");
+        write_executable_script(&jj_script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_jj_script(&root, &store, jj_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/jj/integrate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "good_revisions": ["same-rev"],
+                            "bad_revisions": ["same-rev"]
                         })
                         .to_string(),
                     ))

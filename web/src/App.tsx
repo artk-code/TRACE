@@ -153,6 +153,7 @@ export default function App() {
   const [jjIntegrateMessage, setJjIntegrateMessage] = useState(
     "feat: integrate selected agent revisions",
   );
+  const [jjIntegrateAbandonBad, setJjIntegrateAbandonBad] = useState(false);
   const [jjBusy, setJjBusy] = useState<string | null>(null);
   const [jjError, setJjError] = useState<string | null>(null);
   const [jjResult, setJjResult] = useState<TmuxCommandResponse | null>(null);
@@ -966,6 +967,14 @@ export default function App() {
                   onChange={(event) => setJjIntegrateMessage(event.target.value)}
                 />
               </label>
+              <label className="trace-field trace-checkbox">
+                Abandon Bad Revisions:
+                <input
+                  type="checkbox"
+                  checked={jjIntegrateAbandonBad}
+                  onChange={(event) => setJjIntegrateAbandonBad(event.target.checked)}
+                />
+              </label>
               <button
                 className="trace-btn"
                 onClick={() => {
@@ -980,6 +989,7 @@ export default function App() {
                       good_revisions: goodRevisions,
                       bad_revisions: parseCsvInput(jjIntegrateBadRevisions),
                       message: optionalValue(jjIntegrateMessage),
+                      abandon_bad: jjIntegrateAbandonBad,
                     }),
                   );
                 }}
