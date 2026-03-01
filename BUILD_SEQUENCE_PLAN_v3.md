@@ -34,15 +34,15 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
    - `Run Smoke`
    - `Refresh Status`
    - `View Latest Report`
+12. Browser E2E smoke is implemented and CI-gated:
+   - `web/tests/phase0-smoke.spec.ts`
+   - `.github/workflows/ci.yml` runs `pnpm test:e2e`
 
 ## Execution Sequence
-1. Browser E2E harness + CI gate.
-   - Add one Playwright smoke validating auth check -> run smoke -> report visible.
-   - Gate CI on that test plus existing Rust/web regressions.
-2. Deterministic eval contract.
+1. Deterministic eval contract.
    - Add seeded task pack and expected-output checks.
    - Make benchmark quality outcome reproducible run-to-run.
-3. Merge/PR pipeline.
+2. Merge/PR pipeline.
    - Add winner/stacked-candidate export and Git-compatible PR workflow after smoke path stabilizes.
 
 ## Risks

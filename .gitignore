@@ -3,5 +3,7 @@
 /web/node_modules
 /web/dist
 /web/tsconfig.tsbuildinfo
+/web/playwright-report
+/web/test-results
 /.trace
 .DS_Store

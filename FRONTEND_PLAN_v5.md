@@ -31,8 +31,9 @@ Move from read-focused UI to browser-driven smoke orchestration and benchmark re
 2. Phase B: Report fetch + summary. (Completed)
 3. Phase C: Report drill-down. (Pending)
    - Show per-run rows and filtering by model/profile.
-4. Phase D: Browser E2E. (Pending)
+4. Phase D: Browser E2E. (Completed)
    - Add Playwright for auth check -> run smoke -> report visible path.
+   - Wire CI to run `pnpm --dir web test:e2e`.
 
 ## Frontend Test Tracks
 - Unit (`vitest`): schema/guard and helper logic.
@@ -42,8 +43,9 @@ Move from read-focused UI to browser-driven smoke orchestration and benchmark re
   - report table rendering with fixture payloads
 - E2E (`playwright`, to add):
   - open app, verify auth gate behavior, run smoke workflow, assert report UI
+  - status: baseline landed in `web/tests/phase0-smoke.spec.ts`
 
 ## Definition Of Done
 - Browser can drive smoke run and view benchmark summary end-to-end.
 - UI shows actionable errors for orchestration/report failures.
-- E2E smoke is stable enough for CI gating.
+- E2E smoke is stable enough for CI gating. (Completed on 2026-03-01)

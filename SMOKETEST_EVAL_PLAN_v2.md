@@ -38,16 +38,18 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
   - run smoke
   - poll status
   - view latest report summary
+- Browser E2E smoke is active:
+  - Playwright baseline for auth check -> smoke run -> report visible
+  - CI runs `pnpm --dir web test:e2e`
 
 ## Confirmed Gaps
 - No deterministic task pack + expected scoring contract.
-- No browser E2E suite verifying end-to-end smoke behavior.
 
 ## Milestones
 1. M2: Report retrieval APIs. (Completed)
 2. M3: Minimal web flow. (Completed)
 3. M4: Deterministic evaluator seed pack. (Pending)
-4. M5: Playwright smoke tests + CI gate. (Pending)
+4. M5: Playwright smoke tests + CI gate. (Completed)
 
 ## Acceptance Criteria
 - At least 3 lanes can run a web-triggered smoke flow against one server/root.

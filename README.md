@@ -60,7 +60,7 @@ rustup run stable cargo test --workspace
 pnpm --dir web test
 pnpm --dir web build
 ```
-5. Browser E2E (planned, not landed yet):
+5. Browser E2E:
 ```bash
 pnpm --dir web test:e2e
 ```
@@ -96,6 +96,7 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
   - Smoke workflow controls (`Run Smoke`, `Refresh Status`) with automatic active-run polling.
   - Report retrieval/rendering flow (`View Latest Report`) with model summary table.
   - Read-only task/candidate/output views.
+  - Playwright smoke baseline for auth -> smoke -> report flow.
 
 ## Codex Auth Policy + Preflight
 TRACE exposes a Codex auth status endpoint and enforces auth at lane-spawn time.
@@ -298,9 +299,9 @@ Note:
   - `GET /reports`
   - `GET /reports/{report_id}`
 - Web UI now supports smoke run trigger/poll and latest report retrieval/rendering.
-- Next milestone is Playwright E2E + CI gating for auth -> smoke -> report visibility.
+- Playwright E2E smoke is implemented and CI-gated.
+- Next milestone is deterministic seeded eval/scoring contract.
 
 ## Immediate Blocker-Removal Plan
-1. Add one Playwright smoke test and gate CI on it.
-2. Add deterministic seeded eval pack so scores are stable.
-3. Add merge/PR output pipeline after smoke stability.
+1. Add deterministic seeded eval pack so scores are stable.
+2. Add merge/PR output pipeline after smoke stability.

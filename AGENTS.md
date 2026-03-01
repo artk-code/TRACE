@@ -48,12 +48,13 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Web UI can call tmux orchestration endpoints and display command results/errors.
 - Web UI can trigger smoke workflow runs and poll smoke status from browser controls.
 - Web UI can fetch/render latest benchmark report summaries from `/reports` APIs.
+- Browser E2E smoke harness exists (Playwright) and CI runs `pnpm --dir web test:e2e`.
 
 ## Smoketest Readiness (2026-03-01)
 - Shared-server ingest safety (lock + lease fencing): **82%**
 - Model-vs-model trace capture/report generation: **78%**
 - Web-driven orchestration control surface: **72%**
-- Browser-driven smoke + report UX: **78%**
+- Browser-driven smoke + report UX: **86%**
 - Deterministic evaluator/scoring: **20%**
 - Merge + PR-capable output pipeline: **15%**
 
@@ -67,6 +68,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop and auth preflight status.
 - Web UI includes smoke workflow controls for `Run Smoke` + `Refresh Status` with automatic active-run polling.
 - Web UI includes `View Latest Report` with latest-report fetch and model summary table rendering.
+- Playwright E2E covers auth check -> smoke run -> terminal status -> report visibility and is wired into CI.
 - Lane shells support two execution modes:
   - `interactive` (manual copy/paste flow)
   - `runner` (scripted claim/run/output/candidate/verdict/release flow)
@@ -76,24 +78,19 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Smoke workflow currently requires an existing tmux session and valid target (`session` + `target` preflight).
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
 - No seeded deterministic task/eval pack with expected-output contract.
-- No browser E2E harness (Playwright) gating orchestration/report flows.
 - CLI remains read-oriented (`tasks`, `task`) and not smoke-run capable.
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Browser E2E + CI gate (Phase 0 closure).
-  - Add Playwright smoke covering auth check, smoke run, report visibility.
-  - Gate CI on this test.
-2. Deterministic eval contract.
+1. Deterministic eval contract.
   - Add seeded task pack + expected-output scoring contract.
   - Make benchmark quality signals reproducible across reruns.
-3. Merge/PR pipeline (after smoke stability).
+2. Merge/PR pipeline (after smoke stability).
   - Add winning/stacked candidate export and Git-compatible PR path.
 
 ## Immediate Build Sequence
-1. Add one stable Playwright smoke and CI gate.
-2. Add deterministic seeded eval pack.
-3. Add merge/PR workflow after smoke is reliable.
+1. Add deterministic seeded eval pack.
+2. Add merge/PR workflow after smoke is reliable.
 
 ## Tmux Orchestration Runbook (Now)
 Prerequisite:
@@ -137,6 +134,7 @@ Prerequisite:
 - Fixed: smoke run in-memory history is bounded with pruning (`TRACE_SMOKE_RUN_HISTORY_LIMIT`).
 - Fixed: web smoke polling now keeps retrying after transient `GET /smoke/runs/{run_id}` failures.
 - Fixed: web `View Latest Report` flow fetches benchmark reports via `/reports` and renders model summary table.
+- Fixed: Playwright browser smoke (`auth -> run smoke -> report visible`) is now CI-gated.
 - Open: pane command injection can race if commands are blasted without pacing.
 - Open: no autonomous lane lifecycle manager yet.
 
@@ -185,6 +183,7 @@ Prerequisite:
 - `test_get_report_returns_not_found_for_missing_report`
 - `test_get_report_returns_json_payload_for_existing_report`
 - `web/src/guards.test.ts` runtime schema guard coverage
+- `web/tests/phase0-smoke.spec.ts` browser E2E smoke (Playwright)
 
 ## Exit Criteria
 - Browser UI can trigger and observe a full multi-lane smoke run.
