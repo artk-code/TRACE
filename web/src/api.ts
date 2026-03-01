@@ -7,13 +7,17 @@ import type {
   ReportListResponse,
   TaskResponse,
   TimelineEvent,
+  TmuxPaneCaptureResponse,
   TmuxCommandResponse,
+  TmuxSnapshotResponse,
 } from "./contracts";
 import {
   parseAgentRunResponse,
   parseBenchmarkReport,
   parseCandidates,
   parseCodexAuthStatus,
+  parseTmuxPaneCaptureResponse,
+  parseTmuxSnapshotResponse,
   parseOutput,
   parseReportListResponse,
   parseTaskList,
@@ -32,6 +36,20 @@ export type TmuxStartRequest = {
 
 export type TmuxSessionRequest = {
   session?: string;
+};
+
+export type TmuxCaptureRequest = {
+  session?: string;
+  target: string;
+  lines?: number;
+};
+
+export type TmuxSendKeysRequest = {
+  session?: string;
+  target: string;
+  text?: string;
+  key?: string;
+  press_enter?: boolean;
 };
 
 export type TmuxAddLaneRequest = {
@@ -153,6 +171,21 @@ export async function postTmuxStart(request: TmuxStartRequest): Promise<TmuxComm
 
 export async function postTmuxStatus(request: TmuxSessionRequest): Promise<TmuxCommandResponse> {
   const raw = await postJson("/orchestrator/tmux/status", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postTmuxSnapshot(request: TmuxSessionRequest): Promise<TmuxSnapshotResponse> {
+  const raw = await postJson("/orchestrator/tmux/snapshot", request);
+  return parseTmuxSnapshotResponse(raw);
+}
+
+export async function postTmuxCapture(request: TmuxCaptureRequest): Promise<TmuxPaneCaptureResponse> {
+  const raw = await postJson("/orchestrator/tmux/capture", request);
+  return parseTmuxPaneCaptureResponse(raw);
+}
+
+export async function postTmuxSendKeys(request: TmuxSendKeysRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/tmux/send-keys", request);
   return parseTmuxCommandResponse(raw);
 }
 

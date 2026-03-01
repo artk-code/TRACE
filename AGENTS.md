@@ -41,6 +41,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - `GET /orchestrator/auth/codex/status`
 - Backend tmux orchestration endpoints exist:
   - `POST /orchestrator/tmux/start|status|add-lane|add-pane|stop`
+  - `POST /orchestrator/tmux/snapshot|capture|send-keys` (session tree + pane capture/input)
 - Backend agent workflow endpoints exist:
   - `POST /agent/runs` (legacy alias: `POST /smoke/runs`)
   - `GET /agent/runs/{run_id}` (legacy alias: `GET /smoke/runs/{run_id}`)
@@ -57,6 +58,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Smoke run history is bounded:
   - `TRACE_SMOKE_RUN_HISTORY_LIMIT` (default: `200`)
 - Web UI can call tmux orchestration endpoints and display command results/errors.
+- Web UI can browse tmux panes, stream live pane output, and send pane input.
 - Web UI can trigger agent workflow runs and poll run status from browser controls.
 - Web UI can fetch/render latest benchmark report summaries from `/reports` APIs.
 - Browser E2E smoke harness exists (Playwright) and CI runs `pnpm --dir web test:e2e`.
@@ -78,6 +80,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Default `/agent/runs` output mode is `codex` (real model output); `scripted` remains available for plumbing/debug.
 - Report retrieval APIs expose benchmark JSON over HTTP for browser consumption.
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop and auth preflight status.
+- Web UI includes terminal workspace controls for session tree browsing, pane capture, and pane input send.
 - Web UI includes agent workflow controls for `Run Agents` + `Refresh Status` with automatic active-run polling.
 - Web UI includes `View Latest Report` with latest-report fetch and model summary table rendering.
 - Playwright E2E covers auth check -> smoke run -> terminal status -> report visibility and is wired into CI.
@@ -139,9 +142,15 @@ Prerequisite:
   - `TRACE_RUNNER_EXIT_AFTER_RUN=1`
 7. Check status:
   - `scripts/trace-smoke-tmux.sh status`
-8. Validate target (before smoke workflow triggers):
+8. Snapshot session tree (machine-readable):
+  - `scripts/trace-smoke-tmux.sh snapshot`
+9. Capture pane output:
+  - `scripts/trace-smoke-tmux.sh capture-pane trace-smoke:lanes.0 200`
+10. Send pane input:
+  - `scripts/trace-smoke-tmux.sh send-keys trace-smoke:lanes.0 --text "echo hello" --enter`
+11. Validate target (before smoke workflow triggers):
   - `scripts/trace-smoke-tmux.sh validate-target trace-smoke:lanes`
-9. Stop:
+12. Stop:
   - `scripts/trace-smoke-tmux.sh stop`
 
 ## Tmux Bug Ledger (Current)
@@ -155,6 +164,7 @@ Prerequisite:
 - Fixed: smoke run in-memory history is bounded with pruning (`TRACE_SMOKE_RUN_HISTORY_LIMIT`).
 - Fixed: web smoke polling now keeps retrying after transient `GET /smoke/runs/{run_id}` failures.
 - Fixed: web `View Latest Report` flow fetches benchmark reports via `/reports` and renders model summary table.
+- Fixed: tmux workspace snapshot/capture/send-keys APIs provide structured pane browsing + browser-driven pane input.
 - Fixed: Playwright browser smoke (`auth -> run smoke -> report visible`) is now CI-gated.
 - Open: pane command injection can race if commands are blasted without pacing.
 - Open: no autonomous lane lifecycle manager yet.
@@ -194,6 +204,10 @@ Prerequisite:
 - `test_codex_auth_status_reports_missing_binary`
 - `test_tmux_add_pane_rejects_invalid_mode`
 - `test_tmux_status_maps_script_exit_code_one_to_conflict`
+- `test_tmux_snapshot_returns_structured_session_tree`
+- `test_tmux_capture_returns_pane_text_payload`
+- `test_tmux_send_keys_forwards_text_key_and_enter_flags`
+- `test_tmux_send_keys_requires_payload_or_enter_flag`
 - `test_smoke_run_rejects_when_tmux_session_preflight_fails`
 - `test_smoke_run_rejects_when_tmux_target_preflight_fails`
 - `test_smoke_run_benchmark_scopes_out_unrelated_events_after_start`
@@ -210,6 +224,7 @@ Prerequisite:
 - `web/tests/phase0-smoke.spec.ts` browser E2E smoke (Playwright)
 - `web/tests/phase0-auth-remediation.spec.ts` browser auth remediation smoke (Playwright)
 - `web/tests/phase0-smoke-preflight-errors.spec.ts` browser smoke preflight error handling (Playwright)
+- `web/tests/tmux-workspace.spec.ts` browser tmux workspace pane browse/capture/send-input flow (Playwright)
 
 ## Exit Criteria
 - Browser UI can trigger and observe a full multi-lane smoke run.

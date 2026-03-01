@@ -3,6 +3,8 @@ import {
   benchmarkReportSchema,
   candidateSummarySchema,
   codexAuthStatusSchema,
+  tmuxPaneCaptureResponseSchema,
+  tmuxSnapshotResponseSchema,
   outputChunkSchema,
   reportListResponseSchema,
   taskResponseSchema,
@@ -15,7 +17,9 @@ import {
   type OutputChunk,
   type ReportListResponse,
   type TaskResponse,
+  type TmuxPaneCaptureResponse,
   type TmuxCommandResponse,
+  type TmuxSnapshotResponse,
   type TimelineEvent,
 } from "./contracts";
 
@@ -34,6 +38,8 @@ const codexAuthStatusGuard = codexAuthStatusSchema;
 const agentRunResponseGuard = agentRunResponseSchema;
 const reportListResponseGuard = reportListResponseSchema;
 const benchmarkReportGuard = benchmarkReportSchema;
+const tmuxSnapshotResponseGuard = tmuxSnapshotResponseSchema;
+const tmuxPaneCaptureResponseGuard = tmuxPaneCaptureResponseSchema;
 
 export function parseTaskResponse(raw: unknown): TaskResponse {
   return taskResponseSchema.parse(raw);
@@ -61,6 +67,14 @@ export function parseTmuxCommandResponse(raw: unknown): TmuxCommandResponse {
 
 export function parseCodexAuthStatus(raw: unknown): CodexAuthStatus {
   return codexAuthStatusGuard.parse(raw);
+}
+
+export function parseTmuxSnapshotResponse(raw: unknown): TmuxSnapshotResponse {
+  return tmuxSnapshotResponseGuard.parse(raw);
+}
+
+export function parseTmuxPaneCaptureResponse(raw: unknown): TmuxPaneCaptureResponse {
+  return tmuxPaneCaptureResponseGuard.parse(raw);
 }
 
 export function parseAgentRunResponse(raw: unknown): AgentRunResponse {

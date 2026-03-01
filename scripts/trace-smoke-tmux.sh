@@ -43,8 +43,14 @@ Commands:
       Create session with server + lanes (flash/high/extra) + observer.
   attach
       Attach to session.
+  snapshot
+      Emit machine-readable snapshot for windows/panes/config.
   status
       Show windows and panes for the session.
+  send-keys <target> [--text <text>] [--key <key>] [--enter]
+      Send read/write input to target pane (supports optional Enter).
+  capture-pane <target> [lines]
+      Capture read-only pane text (default lines: 200, max: 5000).
   validate-target <target>
       Validate that a tmux target exists in the session.
   add-lane <lane_name> [profile] [mode]
@@ -66,6 +72,10 @@ Examples:
   $0 --session trace-smoke attach
   $0 add-lane codex4 high
   $0 add-lane codex4 high runner
+  $0 snapshot
+  $0 send-keys trace-smoke:lanes.0 --text "echo hello" --enter
+  $0 send-keys trace-smoke:lanes.0 --key C-c
+  $0 capture-pane trace-smoke:lanes.0 300
   $0 validate-target trace-smoke:lanes
   $0 add-pane codex5 flash trace-smoke:lanes runner
   $0 wait-lane codex5 180
@@ -375,6 +385,122 @@ status_session() {
   echo "TRACE_RUNNER_CODEX_REASONING_EFFORT=$(session_env_value TRACE_RUNNER_CODEX_REASONING_EFFORT || echo "<unset>")"
 }
 
+snapshot_session() {
+  require_tmux
+  if ! session_exists; then
+    echo "session '$SESSION' does not exist." >&2
+    exit 1
+  fi
+  hydrate_config_from_session
+
+  printf "session\t%s\n" "$SESSION"
+  printf "config\tTRACE_ROOT\t%s\n" "$(session_env_value TRACE_ROOT || true)"
+  printf "config\tTRACE_SERVER_ADDR\t%s\n" "$(session_env_value TRACE_SERVER_ADDR || true)"
+  printf "config\tTRACE_RUNNER_OUTPUT_MODE\t%s\n" "$(session_env_value TRACE_RUNNER_OUTPUT_MODE || true)"
+  printf "config\tTRACE_RUNNER_TASK_COUNT\t%s\n" "$(session_env_value TRACE_RUNNER_TASK_COUNT || true)"
+  printf "config\tTRACE_RUNNER_TASK_PREFIX\t%s\n" "$(session_env_value TRACE_RUNNER_TASK_PREFIX || true)"
+  printf "config\tTRACE_RUNNER_CODEX_REASONING_EFFORT\t%s\n" "$(session_env_value TRACE_RUNNER_CODEX_REASONING_EFFORT || true)"
+
+  tmux list-windows -t "$SESSION" -F "window\t#{window_index}\t#{window_name}\t#{window_id}\t#{window_active}" \
+    | sed $'s/\\\\t/\t/g'
+  tmux list-panes -a -f "#{==:#{session_name},$SESSION}" -F "pane\t#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_title}\t#{@trace_lane_name}\t#{@trace_lane_mode}\t#{pane_active}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t#{pane_current_command}" \
+    | sed $'s/\\\\t/\t/g'
+}
+
+capture_pane_output() {
+  require_tmux
+  if ! session_exists; then
+    echo "session '$SESSION' does not exist." >&2
+    exit 1
+  fi
+
+  local target="${1:-}"
+  local lines="${2:-200}"
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 [global opts] capture-pane <target> [lines]" >&2
+    exit 2
+  fi
+  if ! [[ "$lines" =~ ^[0-9]+$ ]] || (( lines < 1 || lines > 5000 )); then
+    echo "lines must be an integer between 1 and 5000" >&2
+    exit 2
+  fi
+  if ! tmux list-panes -t "$target" >/dev/null 2>&1; then
+    echo "target '$target' does not exist in session '$SESSION'" >&2
+    exit 1
+  fi
+
+  tmux capture-pane -p -t "$target" -S "-$lines"
+}
+
+send_keys() {
+  require_tmux
+  if ! session_exists; then
+    echo "session '$SESSION' does not exist." >&2
+    exit 1
+  fi
+
+  local target="${1:-}"
+  shift || true
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 [global opts] send-keys <target> [--text <text>] [--key <key>] [--enter]" >&2
+    exit 2
+  fi
+  if ! tmux list-panes -t "$target" >/dev/null 2>&1; then
+    echo "target '$target' does not exist in session '$SESSION'" >&2
+    exit 1
+  fi
+
+  local text=""
+  local key=""
+  local press_enter=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --text)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --text" >&2
+          exit 2
+        fi
+        text="$2"
+        shift 2
+        ;;
+      --key)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --key" >&2
+          exit 2
+        fi
+        key="$2"
+        shift 2
+        ;;
+      --enter)
+        press_enter=1
+        shift
+        ;;
+      *)
+        echo "unknown send-keys option: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ -z "$text" && -z "$key" && "$press_enter" -eq 0 ]]; then
+    echo "send-keys requires --text and/or --key and/or --enter" >&2
+    exit 2
+  fi
+
+  if [[ -n "$text" ]]; then
+    tmux send-keys -t "$target" -l "$text"
+  fi
+  if [[ -n "$key" ]]; then
+    tmux send-keys -t "$target" "$key"
+  fi
+  if [[ "$press_enter" -eq 1 ]]; then
+    tmux send-keys -t "$target" Enter
+  fi
+
+  echo "sent keys to '$target'"
+}
+
 validate_target() {
   require_tmux
   if ! session_exists; then
@@ -534,8 +660,17 @@ case "$command" in
   attach)
     attach_session
     ;;
+  snapshot)
+    snapshot_session
+    ;;
   status)
     status_session
+    ;;
+  send-keys)
+    send_keys "$@"
+    ;;
+  capture-pane)
+    capture_pane_output "$@"
     ;;
   validate-target)
     validate_target "$@"

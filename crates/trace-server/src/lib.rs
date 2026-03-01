@@ -53,6 +53,9 @@ const DEFAULT_TMUX_SCRIPT_PATH: &str = "scripts/trace-smoke-tmux.sh";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC: u64 = 180;
 const DEFAULT_SMOKE_RUN_HISTORY_LIMIT: usize = 200;
+const DEFAULT_TMUX_CAPTURE_LINES: u64 = 200;
+const MAX_TMUX_CAPTURE_LINES: u64 = 5000;
+const MAX_TMUX_SEND_TEXT_CHARS: usize = 4000;
 const DEFAULT_REPORT_LIST_LIMIT: usize = 50;
 const MAX_REPORT_LIST_LIMIT: usize = 200;
 const MAX_RUNNER_TASK_COUNT: u64 = 50;
@@ -644,6 +647,24 @@ struct TmuxAddPaneRequest {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct TmuxPaneCaptureRequest {
+    session: Option<String>,
+    target: String,
+    lines: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TmuxSendKeysRequest {
+    session: Option<String>,
+    target: String,
+    text: Option<String>,
+    key: Option<String>,
+    press_enter: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct SmokeRunStartRequest {
     session: Option<String>,
     profiles: Option<Vec<String>>,
@@ -669,6 +690,59 @@ struct TmuxCommandResponse {
     exit_code: i32,
     stdout: String,
     stderr: String,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct TmuxSessionConfigResponse {
+    trace_root: Option<String>,
+    trace_server_addr: Option<String>,
+    runner_output_mode: Option<String>,
+    runner_task_count: Option<String>,
+    runner_task_prefix: Option<String>,
+    runner_reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TmuxWindowSnapshot {
+    window_index: u32,
+    window_name: String,
+    window_id: String,
+    active: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TmuxPaneSnapshot {
+    pane_id: String,
+    session: String,
+    window_index: u32,
+    window_name: String,
+    pane_index: u32,
+    target: String,
+    title: String,
+    lane_name: Option<String>,
+    lane_mode: Option<String>,
+    active: bool,
+    dead: bool,
+    dead_status: Option<i32>,
+    pid: Option<u32>,
+    command: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TmuxSnapshotResponse {
+    session: String,
+    windows: Vec<TmuxWindowSnapshot>,
+    panes: Vec<TmuxPaneSnapshot>,
+    config: TmuxSessionConfigResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct TmuxPaneCaptureResponse {
+    session: String,
+    target: String,
+    lines: u64,
+    captured_at: String,
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -900,6 +974,18 @@ fn app_router_with_tmux_script(
         .route("/orchestrator/tmux/start", post(post_tmux_start_handler))
         .route("/orchestrator/tmux/status", post(post_tmux_status_handler))
         .route(
+            "/orchestrator/tmux/snapshot",
+            post(post_tmux_snapshot_handler),
+        )
+        .route(
+            "/orchestrator/tmux/capture",
+            post(post_tmux_capture_handler),
+        )
+        .route(
+            "/orchestrator/tmux/send-keys",
+            post(post_tmux_send_keys_handler),
+        )
+        .route(
             "/orchestrator/tmux/add-lane",
             post(post_tmux_add_lane_handler),
         )
@@ -1066,6 +1152,46 @@ fn validate_runner_timeout(timeout_sec: u64) -> Result<(), (StatusCode, Json<Api
     }
 }
 
+fn validate_tmux_capture_lines(lines: u64) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if (1..=MAX_TMUX_CAPTURE_LINES).contains(&lines) {
+        Ok(())
+    } else {
+        Err(bad_request_error(format!(
+            "lines must be between 1 and {MAX_TMUX_CAPTURE_LINES}"
+        )))
+    }
+}
+
+fn validate_tmux_send_text(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if value.trim().is_empty() {
+        return Err(bad_request_error("text cannot be empty"));
+    }
+    if value.len() > MAX_TMUX_SEND_TEXT_CHARS {
+        return Err(bad_request_error(format!(
+            "text exceeds max length ({MAX_TMUX_SEND_TEXT_CHARS})"
+        )));
+    }
+    if value.contains('\0') {
+        return Err(bad_request_error("text contains invalid characters"));
+    }
+    Ok(())
+}
+
+fn validate_tmux_send_key(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    const ALLOWED_KEYS: [&str; 12] = [
+        "Enter", "Tab", "BSpace", "Escape", "Up", "Down", "Left", "Right", "C-c", "C-z", "C-l",
+        "C-u",
+    ];
+    if ALLOWED_KEYS.contains(&value) {
+        Ok(())
+    } else {
+        Err(bad_request_error(format!(
+            "key must be one of: {}",
+            ALLOWED_KEYS.join(", ")
+        )))
+    }
+}
+
 fn validate_runner_output_mode(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
     match value {
         "codex" | "scripted" => Ok(()),
@@ -1123,6 +1249,21 @@ async fn execute_tmux_script_result(
     state: &ApiState,
     args: Vec<String>,
 ) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_tmux_script_result_with_trim(state, args, true).await
+}
+
+async fn execute_tmux_script_result_raw(
+    state: &ApiState,
+    args: Vec<String>,
+) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_tmux_script_result_with_trim(state, args, false).await
+}
+
+async fn execute_tmux_script_result_with_trim(
+    state: &ApiState,
+    args: Vec<String>,
+    trim_output: bool,
+) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
     let script_path = state.tmux_script_path.clone();
     let command = format!("{} {}", script_path.display(), args.join(" "));
     let command_args = args.clone();
@@ -1134,8 +1275,16 @@ async fn execute_tmux_script_result(
             .map_err(|error| internal_error(format!("failed to execute tmux command: {error}")))?;
 
     let exit_code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = if trim_output {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let stderr = if trim_output {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    } else {
+        String::from_utf8_lossy(&output.stderr).to_string()
+    };
 
     if !output.status.success() {
         let status = match exit_code {
@@ -1143,10 +1292,12 @@ async fn execute_tmux_script_result(
             1 => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let detail = if !stderr.is_empty() {
-            stderr.clone()
-        } else if !stdout.is_empty() {
-            stdout.clone()
+        let stderr_detail = stderr.trim();
+        let stdout_detail = stdout.trim();
+        let detail = if !stderr_detail.is_empty() {
+            stderr_detail.to_string()
+        } else if !stdout_detail.is_empty() {
+            stdout_detail.to_string()
         } else {
             "tmux command failed with no output".to_string()
         };
@@ -1878,6 +2029,283 @@ async fn post_tmux_status_handler(
         vec!["--session".to_string(), session, "status".to_string()],
     )
     .await
+}
+
+fn parse_tmux_bool_field(value: &str, field: &str) -> Result<bool, String> {
+    match value {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("invalid boolean value for {field}: {value}")),
+    }
+}
+
+fn parse_tmux_u32_field(value: &str, field: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("invalid u32 value for {field}: {value}"))
+}
+
+fn parse_tmux_optional_i32_field(value: &str, field: &str) -> Result<Option<i32>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<i32>()
+        .map(Some)
+        .map_err(|_| format!("invalid i32 value for {field}: {value}"))
+}
+
+fn parse_tmux_optional_u32_field(value: &str, field: &str) -> Result<Option<u32>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u32>()
+        .map(Some)
+        .map_err(|_| format!("invalid u32 value for {field}: {value}"))
+}
+
+fn nonempty_or_none(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn parse_tmux_snapshot_stdout(
+    requested_session: &str,
+    stdout: &str,
+) -> Result<TmuxSnapshotResponse, (StatusCode, Json<ApiErrorResponse>)> {
+    let mut snapshot = TmuxSnapshotResponse {
+        session: requested_session.to_string(),
+        windows: Vec::new(),
+        panes: Vec::new(),
+        config: TmuxSessionConfigResponse::default(),
+    };
+
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let Some(kind) = fields.first().copied() else {
+            continue;
+        };
+
+        match kind {
+            "session" => {
+                if let Some(session_name) = fields.get(1) {
+                    snapshot.session = (*session_name).to_string();
+                }
+            }
+            "config" => {
+                if fields.len() < 3 {
+                    return Err(internal_error(format!(
+                        "invalid tmux snapshot config row: {line}"
+                    )));
+                }
+                let key = fields[1];
+                let value = fields[2..].join("\t");
+                match key {
+                    "TRACE_ROOT" => snapshot.config.trace_root = nonempty_or_none(&value),
+                    "TRACE_SERVER_ADDR" => {
+                        snapshot.config.trace_server_addr = nonempty_or_none(&value)
+                    }
+                    "TRACE_RUNNER_OUTPUT_MODE" => {
+                        snapshot.config.runner_output_mode = nonempty_or_none(&value)
+                    }
+                    "TRACE_RUNNER_TASK_COUNT" => {
+                        snapshot.config.runner_task_count = nonempty_or_none(&value)
+                    }
+                    "TRACE_RUNNER_TASK_PREFIX" => {
+                        snapshot.config.runner_task_prefix = nonempty_or_none(&value)
+                    }
+                    "TRACE_RUNNER_CODEX_REASONING_EFFORT" => {
+                        snapshot.config.runner_reasoning_effort = nonempty_or_none(&value)
+                    }
+                    _ => {}
+                }
+            }
+            "window" => {
+                if fields.len() < 5 {
+                    return Err(internal_error(format!(
+                        "invalid tmux snapshot window row: {line}"
+                    )));
+                }
+                let window_index =
+                    parse_tmux_u32_field(fields[1], "window_index").map_err(internal_error)?;
+                let active =
+                    parse_tmux_bool_field(fields[4], "window_active").map_err(internal_error)?;
+                snapshot.windows.push(TmuxWindowSnapshot {
+                    window_index,
+                    window_name: fields[2].to_string(),
+                    window_id: fields[3].to_string(),
+                    active,
+                });
+            }
+            "pane" => {
+                if fields.len() < 14 {
+                    return Err(internal_error(format!(
+                        "invalid tmux snapshot pane row: {line}"
+                    )));
+                }
+
+                let pane_id = fields[1].to_string();
+                let session = fields[2].to_string();
+                let window_index =
+                    parse_tmux_u32_field(fields[3], "window_index").map_err(internal_error)?;
+                let window_name = fields[4].to_string();
+                let pane_index =
+                    parse_tmux_u32_field(fields[5], "pane_index").map_err(internal_error)?;
+                let title = fields[6].to_string();
+                let lane_name = nonempty_or_none(fields[7]);
+                let lane_mode = nonempty_or_none(fields[8]);
+                let active =
+                    parse_tmux_bool_field(fields[9], "pane_active").map_err(internal_error)?;
+                let dead =
+                    parse_tmux_bool_field(fields[10], "pane_dead").map_err(internal_error)?;
+                let dead_status = parse_tmux_optional_i32_field(fields[11], "pane_dead_status")
+                    .map_err(internal_error)?;
+                let pid = parse_tmux_optional_u32_field(fields[12], "pane_pid")
+                    .map_err(internal_error)?;
+                let command = fields[13..].join("\t");
+
+                snapshot.panes.push(TmuxPaneSnapshot {
+                    pane_id,
+                    session: session.clone(),
+                    window_index,
+                    window_name: window_name.clone(),
+                    pane_index,
+                    target: format!("{session}:{window_name}.{pane_index}"),
+                    title,
+                    lane_name,
+                    lane_mode,
+                    active,
+                    dead,
+                    dead_status,
+                    pid,
+                    command,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    snapshot
+        .windows
+        .sort_by(|left, right| left.window_index.cmp(&right.window_index));
+    snapshot.panes.sort_by(|left, right| {
+        left.window_index
+            .cmp(&right.window_index)
+            .then_with(|| left.pane_index.cmp(&right.pane_index))
+    });
+
+    Ok(snapshot)
+}
+
+async fn post_tmux_snapshot_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxSessionRequest>,
+) -> Result<Json<TmuxSnapshotResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = validate_tmux_session(request.session)?;
+    let response = execute_tmux_script_result(
+        &state,
+        vec![
+            "--session".to_string(),
+            session.clone(),
+            "snapshot".to_string(),
+        ],
+    )
+    .await?;
+    let snapshot = parse_tmux_snapshot_stdout(&session, &response.stdout)?;
+    Ok(Json(snapshot))
+}
+
+async fn post_tmux_capture_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxPaneCaptureRequest>,
+) -> Result<Json<TmuxPaneCaptureResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let session = validate_tmux_session(request.session)?;
+    validate_tmux_target(&request.target)?;
+    let lines = request.lines.unwrap_or(DEFAULT_TMUX_CAPTURE_LINES);
+    validate_tmux_capture_lines(lines)?;
+
+    let response = execute_tmux_script_result_raw(
+        &state,
+        vec![
+            "--session".to_string(),
+            session.clone(),
+            "capture-pane".to_string(),
+            request.target.clone(),
+            lines.to_string(),
+        ],
+    )
+    .await?;
+
+    Ok(Json(TmuxPaneCaptureResponse {
+        session,
+        target: request.target,
+        lines,
+        captured_at: now_utc_rfc3339(),
+        content: response.stdout,
+    }))
+}
+
+async fn post_tmux_send_keys_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<TmuxSendKeysRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let TmuxSendKeysRequest {
+        session,
+        target,
+        text,
+        key,
+        press_enter,
+    } = request;
+
+    let session = validate_tmux_session(session)?;
+    validate_tmux_target(&target)?;
+    let text = text
+        .map(|value| {
+            validate_tmux_send_text(&value)?;
+            Ok(value)
+        })
+        .transpose()?;
+    let key = key
+        .map(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(bad_request_error("key cannot be empty"));
+            }
+            validate_tmux_send_key(&trimmed)?;
+            Ok(trimmed)
+        })
+        .transpose()?;
+    let press_enter = press_enter.unwrap_or(false);
+
+    if text.is_none() && key.is_none() && !press_enter {
+        return Err(bad_request_error(
+            "send-keys requires text, key, or press_enter=true",
+        ));
+    }
+
+    let mut args = vec![
+        "--session".to_string(),
+        session,
+        "send-keys".to_string(),
+        target,
+    ];
+    if let Some(text) = text {
+        args.push("--text".to_string());
+        args.push(text);
+    }
+    if let Some(key) = key {
+        args.push("--key".to_string());
+        args.push(key);
+    }
+    if press_enter {
+        args.push("--enter".to_string());
+    }
+
+    execute_tmux_script(&state, args).await
 }
 
 async fn post_tmux_add_lane_handler(
@@ -4566,6 +4994,190 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("session missing"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_snapshot_returns_structured_session_tree() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let script_path = root.join("tmux-snapshot.sh");
+        write_executable_script(
+            &script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${3:-}\" == \"snapshot\" ]]; then\n  printf 'session\\ttrace-web-test\\n'\n  printf 'config\\tTRACE_ROOT\\t/tmp/trace-web-test\\n'\n  printf 'config\\tTRACE_SERVER_ADDR\\t127.0.0.1:18090\\n'\n  printf 'window\\t0\\tlanes\\t@1\\t1\\n'\n  printf 'window\\t1\\tobserver\\t@2\\t0\\n'\n  printf 'pane\\t%%1\\ttrace-web-test\\t0\\tlanes\\t0\\tlane-flash\\tflash\\trunner\\t1\\t0\\t0\\t12345\\tbash\\n'\n  printf 'pane\\t%%2\\ttrace-web-test\\t0\\tlanes\\t1\\tlane-high\\thigh\\trunner\\t0\\t1\\t0\\t12346\\tbash\\n'\n  exit 0\nfi\necho \"unsupported\" >&2\nexit 2\n",
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/snapshot")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["session"].as_str(), Some("trace-web-test"));
+        assert_eq!(parsed["windows"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed["panes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            parsed["config"]["trace_root"].as_str(),
+            Some("/tmp/trace-web-test")
+        );
+        assert_eq!(parsed["panes"][0]["pane_id"].as_str(), Some("%1"));
+        assert_eq!(
+            parsed["panes"][0]["target"].as_str(),
+            Some("trace-web-test:lanes.0")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_capture_returns_pane_text_payload() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let script_path = root.join("tmux-capture.sh");
+        write_executable_script(
+            &script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${3:-}\" == \"capture-pane\" ]]; then\n  printf 'line one\\n'\n  printf '  indented line\\n'\n  printf 'line three\\n'\n  exit 0\nfi\necho \"unsupported\" >&2\nexit 2\n",
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/capture")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "target": "%1",
+                            "lines": 50
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["session"].as_str(), Some("trace-web-test"));
+        assert_eq!(parsed["target"].as_str(), Some("%1"));
+        assert_eq!(parsed["lines"].as_u64(), Some(50));
+        assert_eq!(
+            parsed["content"].as_str(),
+            Some("line one\n  indented line\nline three\n")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_send_keys_forwards_text_key_and_enter_flags() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let script_path = root.join("tmux-send-keys.sh");
+        write_executable_script(
+            &script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"ok\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/send-keys")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "target": "%1",
+                            "text": "echo hello",
+                            "key": "C-c",
+                            "press_enter": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["exit_code"].as_i64(), Some(0));
+
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("--session trace-web-test"));
+        assert!(logged_args.contains("send-keys %1 --text echo hello --key C-c --enter"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tmux_send_keys_requires_payload_or_enter_flag() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let script_path = root.join("tmux-unused.sh");
+        write_executable_script(&script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_tmux_script(&root, &store, script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/tmux/send-keys")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "target": "%1"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("send-keys requires text, key, or press_enter=true"));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

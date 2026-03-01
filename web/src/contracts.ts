@@ -72,6 +72,64 @@ export const tmuxCommandResponseSchema = z
   })
   .strict();
 
+export const tmuxSessionConfigSchema = z
+  .object({
+    trace_root: z.string().optional().nullable(),
+    trace_server_addr: z.string().optional().nullable(),
+    runner_output_mode: z.string().optional().nullable(),
+    runner_task_count: z.string().optional().nullable(),
+    runner_task_prefix: z.string().optional().nullable(),
+    runner_reasoning_effort: z.string().optional().nullable(),
+  })
+  .strict();
+
+export const tmuxWindowSnapshotSchema = z
+  .object({
+    window_index: z.number().int().nonnegative(),
+    window_name: z.string(),
+    window_id: z.string(),
+    active: z.boolean(),
+  })
+  .strict();
+
+export const tmuxPaneSnapshotSchema = z
+  .object({
+    pane_id: z.string(),
+    session: z.string(),
+    window_index: z.number().int().nonnegative(),
+    window_name: z.string(),
+    pane_index: z.number().int().nonnegative(),
+    target: z.string(),
+    title: z.string(),
+    lane_name: z.string().optional().nullable(),
+    lane_mode: z.string().optional().nullable(),
+    active: z.boolean(),
+    dead: z.boolean(),
+    dead_status: z.number().int().optional().nullable(),
+    pid: z.number().int().optional().nullable(),
+    command: z.string(),
+  })
+  .strict();
+
+export const tmuxSnapshotResponseSchema = z
+  .object({
+    session: z.string(),
+    windows: z.array(tmuxWindowSnapshotSchema),
+    panes: z.array(tmuxPaneSnapshotSchema),
+    config: tmuxSessionConfigSchema,
+  })
+  .strict();
+
+export const tmuxPaneCaptureResponseSchema = z
+  .object({
+    session: z.string(),
+    target: z.string(),
+    lines: z.number().int().positive(),
+    captured_at: z.string(),
+    content: z.string(),
+  })
+  .strict();
+
 export const codexAuthStatusSchema = z
   .object({
     command: z.string(),
@@ -197,6 +255,11 @@ export type TimelineEvent = z.infer<typeof timelineEventSchema>;
 export type CandidateSummary = z.infer<typeof candidateSummarySchema>;
 export type OutputChunk = z.infer<typeof outputChunkSchema>;
 export type TmuxCommandResponse = z.infer<typeof tmuxCommandResponseSchema>;
+export type TmuxSessionConfig = z.infer<typeof tmuxSessionConfigSchema>;
+export type TmuxWindowSnapshot = z.infer<typeof tmuxWindowSnapshotSchema>;
+export type TmuxPaneSnapshot = z.infer<typeof tmuxPaneSnapshotSchema>;
+export type TmuxSnapshotResponse = z.infer<typeof tmuxSnapshotResponseSchema>;
+export type TmuxPaneCaptureResponse = z.infer<typeof tmuxPaneCaptureResponseSchema>;
 export type CodexAuthStatus = z.infer<typeof codexAuthStatusSchema>;
 export type BenchmarkModelSummary = z.infer<typeof benchmarkModelSummarySchema>;
 export type BenchmarkSummary = z.infer<typeof benchmarkSummarySchema>;

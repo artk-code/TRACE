@@ -3,6 +3,7 @@ TRACE is a *local-first* harness that binds agent work to tasks, records immutab
 
 ## UI Preview
 ![TRACE Multi-Agent Control Panel](docs/phase0-ui-screenshot.png)
+![TRACE Terminal Workspace Live Input Proof](docs/tmux-terminal-workspace-proof.png)
 
 ## Active Planning Docs
 - [AGENTS.md](/Users/artk/Documents/GitHub/TRACE/AGENTS.md)
@@ -100,7 +101,15 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
    - `Status`
    - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
-4. Use the **Agent Runs** section:
+4. Use the **Terminal Workspace** section:
+   - `Load Session Tree` (`POST /orchestrator/tmux/snapshot`)
+   - select pane from list to stream output
+   - pane output auto-refreshes via `POST /orchestrator/tmux/capture`
+   - send pane input via:
+     - command box + `Send Input`
+     - shortcut buttons (`Enter`, `Ctrl+C`, `Up`, `Down`, `Tab`)
+     - input keyboard shortcuts (`Enter`, `Ctrl+C`, `Ctrl+L`)
+5. Use the **Agent Runs** section:
    - `Run Agents` (`POST /agent/runs`)
    - `Refresh Status` (`GET /agent/runs/{run_id}`)
    - active runs auto-poll until terminal status
@@ -115,6 +124,10 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
 - Current UI supports:
   - Codex auth preflight check.
   - tmux orchestration controls (`start`, `status`, `add-lane`, `add-pane`, `stop`).
+  - tmux terminal workspace controls:
+    - `Load Session Tree` (`/orchestrator/tmux/snapshot`)
+    - pane selector and live pane capture (`/orchestrator/tmux/capture`)
+    - pane input send (`/orchestrator/tmux/send-keys`) with command box + shortcut keys
   - Agent run controls (`Run Agents`, `Refresh Status`) with automatic active-run polling.
   - Runtime lane controls in Agent Runs panel:
     - `Output Mode` (`codex|scripted`)
@@ -124,6 +137,8 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
   - Report retrieval/rendering flow (`View Latest Report`) with model summary table.
   - Read-only task/candidate/output views.
   - Playwright smoke baseline for auth -> agent run -> report flow.
+  - Live pane-input proof screenshot:
+    - `docs/tmux-terminal-workspace-proof.png`
   - CI Playwright scenario is API-stubbed for stability; real tmux/server verification is tracked in `docs/PHASE0_HUMAN_QA.md`.
 
 ## Codex Auth Policy + Preflight
@@ -203,6 +218,59 @@ scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes runner
 ```bash
 scripts/trace-smoke-tmux.sh stop
 ```
+
+## Tmux Workspace API Contract
+`POST /orchestrator/tmux/snapshot`
+
+Request JSON:
+- `session` optional string, default `trace-smoke`.
+
+Behavior:
+- Runs tmux snapshot command scoped to the requested session.
+- Returns structured session metadata for UI pane browsing.
+
+Success response:
+- HTTP `200 OK`.
+- Returns:
+  - `session`
+  - `windows[]` (`window_index`, `window_name`, `window_id`, `active`)
+  - `panes[]` (`pane_id`, `session`, `window_index`, `window_name`, `pane_index`, `target`, `title`, `lane_name`, `lane_mode`, `active`, `dead`, `dead_status`, `pid`, `command`)
+  - `config` (`trace_root`, `trace_server_addr`, `runner_output_mode`, `runner_task_count`, `runner_task_prefix`, `runner_reasoning_effort`)
+
+`POST /orchestrator/tmux/capture`
+
+Request JSON:
+- `session` optional string, default `trace-smoke`.
+- `target` required tmux target token (supports pane ids like `%1`).
+- `lines` optional integer in `[1, 5000]`, default `200`.
+
+Behavior:
+- Captures read-only pane text using tmux capture.
+- Does not execute commands or forward keyboard input.
+
+Success response:
+- HTTP `200 OK`.
+- Returns:
+  - `session`, `target`, `lines`, `captured_at`, `content`
+
+`POST /orchestrator/tmux/send-keys`
+
+Request JSON:
+- `session` optional string, default `trace-smoke`.
+- `target` required tmux target token (supports pane ids like `%1`).
+- `text` optional text payload (max 4000 chars).
+- `key` optional key token from allowlist:
+  - `Enter`, `Tab`, `BSpace`, `Escape`, `Up`, `Down`, `Left`, `Right`, `C-c`, `C-z`, `C-l`, `C-u`
+- `press_enter` optional bool; when true, sends Enter after text/key.
+
+Behavior:
+- Sends input to the target pane using tmux `send-keys`.
+- Requires at least one input action: `text`, `key`, or `press_enter=true`.
+
+Success response:
+- HTTP `200 OK`.
+- Returns standard tmux command payload:
+  - `command`, `exit_code`, `stdout`, `stderr`
 
 ## Agent Run API Contract
 `POST /agent/runs`
@@ -288,6 +356,18 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/status \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke"}'
 
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/snapshot \
+  -H 'content-type: application/json' \
+  -d '{"session":"trace-web-smoke"}' | jq .
+
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/capture \
+  -H 'content-type: application/json' \
+  -d '{"session":"trace-web-smoke","target":"trace-web-smoke:lanes.0","lines":120}' | jq .
+
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/send-keys \
+  -H 'content-type: application/json' \
+  -d '{"session":"trace-web-smoke","target":"trace-web-smoke:lanes.0","text":"echo from browser","press_enter":true}' | jq .
+
 scripts/trace-smoke-tmux.sh --session trace-web-smoke validate-target trace-web-smoke:lanes
 
 RUN_ID="$(curl -sS -X POST http://127.0.0.1:18086/agent/runs \
@@ -324,6 +404,12 @@ Note:
   - tmux session preflight failed; start session first.
 - `409 Conflict` from `POST /agent/runs` mentioning `validate-target`:
   - target pane/window does not exist; validate or adjust target.
+- `409 Conflict` from `POST /orchestrator/tmux/snapshot` or `/capture`:
+  - tmux session missing or pane target not found.
+- `400 Bad Request` from `POST /orchestrator/tmux/capture`:
+  - invalid `target` token or `lines` outside `[1, 5000]`.
+- `400 Bad Request` from `POST /orchestrator/tmux/send-keys`:
+  - missing input action (`text`/`key`/`press_enter=true`), invalid `key`, or oversized/empty `text`.
 - `409 Conflict` mentioning `history limit reached`:
   - increase `TRACE_SMOKE_RUN_HISTORY_LIMIT` or wait for terminal runs to be pruned.
 - `400 Bad Request` on smoke start:
@@ -338,13 +424,19 @@ Note:
 - Monorepo scaffold is in place (Rust + TypeScript workspace).
 - Read-side API projections from canonical event log are implemented.
 - tmux orchestration routes are implemented in backend and wired into web UI controls.
+- tmux workspace read APIs are implemented:
+  - `POST /orchestrator/tmux/snapshot`
+  - `POST /orchestrator/tmux/capture`
+- tmux pane input API is implemented:
+  - `POST /orchestrator/tmux/send-keys`
 - Smoke workflow API is implemented:
   - `POST /agent/runs` (legacy alias: `/smoke/runs`)
   - `GET /agent/runs/{run_id}` (legacy alias: `/smoke/runs/{run_id}`)
 - Report retrieval APIs are implemented:
   - `GET /reports`
   - `GET /reports/{report_id}`
-- Web UI now supports agent run trigger/poll and latest report retrieval/rendering.
+- Web UI now supports tmux pane browsing + live pane capture + pane input send, agent run trigger/poll, and latest report retrieval/rendering.
+- Web UI now supports tmux pane browsing + live capture + pane input send, agent run trigger/poll, and latest report retrieval/rendering.
 - Playwright E2E smoke is implemented and CI-gated.
 - Phase 0 sign-off artifacts are tracked under:
   - [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)

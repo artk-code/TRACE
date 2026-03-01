@@ -7,7 +7,9 @@ import {
   parseCodexAuthStatus,
   parseReportListResponse,
   parseTaskResponse,
+  parseTmuxPaneCaptureResponse,
   parseTmuxCommandResponse,
+  parseTmuxSnapshotResponse,
 } from "./guards";
 
 describe("task_response_guard_accepts_nested_shape", () => {
@@ -93,6 +95,64 @@ describe("tmux_command_response_guard", () => {
     };
 
     expect(() => parseTmuxCommandResponse(payload)).toThrow();
+  });
+});
+
+describe("tmux_snapshot_guard", () => {
+  it("accepts tmux snapshot response shape", () => {
+    const payload = {
+      session: "trace-smoke",
+      windows: [
+        {
+          window_index: 0,
+          window_name: "lanes",
+          window_id: "@1",
+          active: true,
+        },
+      ],
+      panes: [
+        {
+          pane_id: "%1",
+          session: "trace-smoke",
+          window_index: 0,
+          window_name: "lanes",
+          pane_index: 0,
+          target: "trace-smoke:lanes.0",
+          title: "lane-flash",
+          lane_name: "flash",
+          lane_mode: "runner",
+          active: true,
+          dead: false,
+          dead_status: 0,
+          pid: 12345,
+          command: "bash",
+        },
+      ],
+      config: {
+        trace_root: "/tmp/trace-smoke",
+        trace_server_addr: "127.0.0.1:18080",
+        runner_output_mode: "codex",
+        runner_task_count: "1",
+        runner_task_prefix: "TASK-SMOKE",
+        runner_reasoning_effort: "low",
+      },
+    };
+
+    expect(parseTmuxSnapshotResponse(payload).panes[0]?.pane_id).toBe("%1");
+  });
+});
+
+describe("tmux_capture_guard", () => {
+  it("accepts tmux pane capture response shape", () => {
+    const payload = {
+      session: "trace-smoke",
+      target: "%1",
+      lines: 200,
+      captured_at: "2026-03-01T08:00:00Z",
+      content: "line 1\nline 2\n",
+    };
+
+    expect(parseTmuxPaneCaptureResponse(payload).target).toBe("%1");
   });
 });
 

@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import type { BenchmarkReport, CodexAuthStatus, AgentRunResponse, TmuxCommandResponse } from "./contracts";
+import type {
+  AgentRunResponse,
+  BenchmarkReport,
+  CodexAuthStatus,
+  TmuxCommandResponse,
+  TmuxPaneSnapshot,
+  TmuxSnapshotResponse,
+} from "./contracts";
 import {
   fetchCodexAuthStatus,
   fetchCandidates,
@@ -13,6 +20,9 @@ import {
   postAgentRun,
   postTmuxAddLane,
   postTmuxAddPane,
+  postTmuxCapture,
+  postTmuxSendKeys,
+  postTmuxSnapshot,
   postTmuxStart,
   postTmuxStatus,
   postTmuxStop,
@@ -46,6 +56,13 @@ function parseProfilesInput(value: string): string[] | undefined {
 
 function isAgentTerminal(status: AgentRunResponse["status"]): boolean {
   return status === "succeeded" || status === "failed";
+}
+
+function findPaneById(snapshot: TmuxSnapshotResponse | null, paneId: string): TmuxPaneSnapshot | null {
+  if (!snapshot || paneId.trim() === "") {
+    return null;
+  }
+  return snapshot.panes.find((pane) => pane.pane_id === paneId) ?? null;
 }
 
 export default function App() {
@@ -90,6 +107,20 @@ export default function App() {
   const [orchestrationBusy, setOrchestrationBusy] = useState<string | null>(null);
   const [orchestrationError, setOrchestrationError] = useState<string | null>(null);
   const [orchestrationResult, setOrchestrationResult] = useState<TmuxCommandResponse | null>(null);
+  const [tmuxSnapshotBusy, setTmuxSnapshotBusy] = useState(false);
+  const [tmuxSnapshotError, setTmuxSnapshotError] = useState<string | null>(null);
+  const [tmuxSnapshot, setTmuxSnapshot] = useState<TmuxSnapshotResponse | null>(null);
+  const [selectedPaneId, setSelectedPaneId] = useState("");
+  const [paneLines, setPaneLines] = useState("200");
+  const [paneCaptureBusy, setPaneCaptureBusy] = useState(false);
+  const [paneCaptureError, setPaneCaptureError] = useState<string | null>(null);
+  const [paneCaptureText, setPaneCaptureText] = useState("");
+  const [paneCapturedAt, setPaneCapturedAt] = useState<string | null>(null);
+  const [paneInput, setPaneInput] = useState("");
+  const [paneInputBusy, setPaneInputBusy] = useState(false);
+  const [paneInputError, setPaneInputError] = useState<string | null>(null);
+  const [paneInputLastAction, setPaneInputLastAction] = useState<string | null>(null);
+  const panePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const tasksQuery = useQuery({
     queryKey: ["tasks"],
@@ -131,6 +162,11 @@ export default function App() {
     return `${normalized}:lanes`;
   }, [session]);
 
+  const selectedPane = useMemo(
+    () => findPaneById(tmuxSnapshot, selectedPaneId),
+    [tmuxSnapshot, selectedPaneId],
+  );
+
   async function runOrchestrationAction(
     actionName: string,
     action: () => Promise<TmuxCommandResponse>,
@@ -144,6 +180,105 @@ export default function App() {
       setOrchestrationError((error as Error).message);
     } finally {
       setOrchestrationBusy(null);
+    }
+  }
+
+  async function refreshTmuxSnapshot(): Promise<void> {
+    setTmuxSnapshotBusy(true);
+    setTmuxSnapshotError(null);
+    try {
+      const snapshot = await postTmuxSnapshot({
+        session: optionalValue(session),
+      });
+      setTmuxSnapshot(snapshot);
+      setSelectedPaneId((current) => {
+        if (current !== "" && snapshot.panes.some((pane) => pane.pane_id === current)) {
+          return current;
+        }
+        return snapshot.panes[0]?.pane_id ?? "";
+      });
+      if (snapshot.panes.length === 0) {
+        setPaneCaptureText("");
+        setPaneCapturedAt(null);
+      }
+    } catch (error) {
+      setTmuxSnapshotError((error as Error).message);
+      setTmuxSnapshot(null);
+      setSelectedPaneId("");
+      setPaneCaptureText("");
+      setPaneCapturedAt(null);
+    } finally {
+      setTmuxSnapshotBusy(false);
+    }
+  }
+
+  async function refreshPaneCapture(explicitPane?: TmuxPaneSnapshot | null): Promise<void> {
+    const pane = explicitPane ?? selectedPane;
+    if (!pane) {
+      setPaneCaptureError("Select a pane from the session tree first");
+      return;
+    }
+
+    setPaneCaptureBusy(true);
+    setPaneCaptureError(null);
+    try {
+      const capture = await postTmuxCapture({
+        session: optionalValue(session),
+        target: pane.pane_id,
+        lines: optionalPositiveInt(paneLines),
+      });
+      setPaneCaptureText(capture.content);
+      setPaneCapturedAt(capture.captured_at);
+    } catch (error) {
+      setPaneCaptureError((error as Error).message);
+    } finally {
+      setPaneCaptureBusy(false);
+    }
+  }
+
+  async function sendPaneInput(options?: {
+    text?: string;
+    key?: string;
+    pressEnter?: boolean;
+    clearTextAfterSend?: boolean;
+  }): Promise<void> {
+    if (!selectedPane) {
+      setPaneInputError("Select a pane before sending input");
+      return;
+    }
+
+    const text = options?.text;
+    const key = options?.key;
+    const pressEnter = options?.pressEnter ?? false;
+    if ((!text || text.trim() === "") && !key && !pressEnter) {
+      setPaneInputError("Type input text or choose a shortcut key");
+      return;
+    }
+
+    setPaneInputBusy(true);
+    setPaneInputError(null);
+    try {
+      await postTmuxSendKeys({
+        session: optionalValue(session),
+        target: selectedPane.pane_id,
+        text,
+        key,
+        press_enter: pressEnter,
+      });
+      const actionParts = [
+        text && text.trim() !== "" ? `text="${text}"` : null,
+        key ? `key=${key}` : null,
+        pressEnter ? "enter=true" : null,
+      ].filter((part): part is string => Boolean(part));
+      setPaneInputLastAction(actionParts.join(" | "));
+      if (options?.clearTextAfterSend) {
+        setPaneInput("");
+      }
+      await refreshPaneCapture(selectedPane);
+    } catch (error) {
+      setPaneInputError((error as Error).message);
+    } finally {
+      setPaneInputBusy(false);
     }
   }
 
@@ -297,6 +432,68 @@ export default function App() {
       }
     };
   }, [agentRun, agentPollTick]);
+
+  useEffect(() => {
+    if (panePollTimerRef.current) {
+      clearTimeout(panePollTimerRef.current);
+      panePollTimerRef.current = null;
+    }
+
+    if (!selectedPane) {
+      setPaneCaptureText("");
+      setPaneCapturedAt(null);
+      return;
+    }
+
+    let canceled = false;
+    const lines = optionalPositiveInt(paneLines);
+
+    const poll = async (): Promise<void> => {
+      if (canceled) {
+        return;
+      }
+
+      setPaneCaptureBusy(true);
+      try {
+        const capture = await postTmuxCapture({
+          session: optionalValue(session),
+          target: selectedPane.pane_id,
+          lines,
+        });
+        if (!canceled) {
+          setPaneCaptureError(null);
+          setPaneCaptureText(capture.content);
+          setPaneCapturedAt(capture.captured_at);
+        }
+      } catch (error) {
+        if (!canceled) {
+          setPaneCaptureError((error as Error).message);
+        }
+      } finally {
+        if (!canceled) {
+          setPaneCaptureBusy(false);
+          panePollTimerRef.current = setTimeout(() => {
+            void poll();
+          }, 2000);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      canceled = true;
+      if (panePollTimerRef.current) {
+        clearTimeout(panePollTimerRef.current);
+        panePollTimerRef.current = null;
+      }
+    };
+  }, [selectedPane, paneLines, session]);
+
+  useEffect(() => {
+    setPaneInputError(null);
+    setPaneInputLastAction(null);
+  }, [selectedPaneId]);
 
   return (
     <div className="trace-app-shell">
@@ -513,6 +710,157 @@ export default function App() {
           ) : (
             <pre className="trace-console">No orchestration command executed yet.</pre>
           )}
+        </section>
+
+        <section className="trace-panel trace-panel-wide">
+          <h2>Terminal Workspace</h2>
+          <p>Browse tmux windows/panes, stream live output, and send lane input from the browser.</p>
+          <div className="trace-button-row">
+            <button className="trace-btn trace-btn-primary" onClick={() => void refreshTmuxSnapshot()} disabled={tmuxSnapshotBusy}>
+              Load Session Tree
+            </button>
+            <button
+              className="trace-btn"
+              onClick={async () => {
+                await refreshTmuxSnapshot();
+                await refreshPaneCapture();
+              }}
+              disabled={tmuxSnapshotBusy || paneCaptureBusy}
+            >
+              Reconnect Stream
+            </button>
+            <button
+              className="trace-btn"
+              onClick={() => void refreshPaneCapture()}
+              disabled={paneCaptureBusy || !selectedPane || tmuxSnapshotBusy}
+            >
+              Capture Now
+            </button>
+          </div>
+          <label className="trace-field">
+            Capture Lines:
+            <input value={paneLines} onChange={(event) => setPaneLines(event.target.value)} />
+          </label>
+          {tmuxSnapshotBusy ? <p className="trace-note">Loading tmux session tree...</p> : null}
+          {tmuxSnapshotError ? <p className="trace-error">Session tree failed: {tmuxSnapshotError}</p> : null}
+          {tmuxSnapshot ? (
+            <p className="trace-note">
+              session={tmuxSnapshot.session} | windows={tmuxSnapshot.windows.length} | panes=
+              {tmuxSnapshot.panes.length}
+            </p>
+          ) : (
+            <p className="trace-note">No session snapshot loaded yet.</p>
+          )}
+          <div className="trace-terminal-grid">
+            <aside className="trace-terminal-sidebar">
+              <h3>Panes</h3>
+              {tmuxSnapshot && tmuxSnapshot.panes.length > 0 ? (
+                <div className="trace-pane-list">
+                  {tmuxSnapshot.panes.map((pane) => {
+                    const paneLabel = `${pane.window_name}.${pane.pane_index} (${pane.pane_id})`;
+                    return (
+                      <button
+                        key={pane.pane_id}
+                        className={`trace-pane-btn ${selectedPaneId === pane.pane_id ? "is-selected" : ""}`}
+                        onClick={() => setSelectedPaneId(pane.pane_id)}
+                        type="button"
+                      >
+                        <span>{paneLabel}</span>
+                        <span>
+                          lane={pane.lane_name ?? "-"} | mode={pane.lane_mode ?? "-"} | dead=
+                          {String(pane.dead)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="trace-note">No panes available.</p>
+              )}
+            </aside>
+            <div className="trace-terminal-view">
+              <h3>Live Pane Output</h3>
+              {selectedPane ? (
+                <p className="trace-note">
+                  target={selectedPane.target} | pane_id={selectedPane.pane_id} | cmd=
+                  {selectedPane.command || "-"}
+                </p>
+              ) : (
+                <p className="trace-note">Select a pane to begin streaming output.</p>
+              )}
+              {selectedPane ? <p className="trace-note">Auto-refresh every 2s while selected.</p> : null}
+              <div className="trace-terminal-controls">
+                <label className="trace-field">
+                  Command Input:
+                  <input
+                    value={paneInput}
+                    disabled={!selectedPane || paneInputBusy}
+                    placeholder="Type command text and press Enter to send"
+                    onChange={(event) => setPaneInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        void sendPaneInput({
+                          text: paneInput,
+                          pressEnter: true,
+                          clearTextAfterSend: true,
+                        });
+                        return;
+                      }
+                      if (event.ctrlKey && event.key.toLowerCase() === "c") {
+                        event.preventDefault();
+                        void sendPaneInput({ key: "C-c" });
+                        return;
+                      }
+                      if (event.ctrlKey && event.key.toLowerCase() === "l") {
+                        event.preventDefault();
+                        void sendPaneInput({ key: "C-l" });
+                      }
+                    }}
+                  />
+                </label>
+                <div className="trace-button-row">
+                  <button
+                    className="trace-btn"
+                    onClick={() =>
+                      void sendPaneInput({
+                        text: paneInput,
+                        pressEnter: true,
+                        clearTextAfterSend: true,
+                      })
+                    }
+                    disabled={!selectedPane || paneInputBusy}
+                  >
+                    Send Input
+                  </button>
+                  <button className="trace-btn" onClick={() => void sendPaneInput({ key: "Enter" })} disabled={!selectedPane || paneInputBusy}>
+                    Enter
+                  </button>
+                  <button className="trace-btn" onClick={() => void sendPaneInput({ key: "C-c" })} disabled={!selectedPane || paneInputBusy}>
+                    Ctrl+C
+                  </button>
+                  <button className="trace-btn" onClick={() => void sendPaneInput({ key: "Up" })} disabled={!selectedPane || paneInputBusy}>
+                    Up
+                  </button>
+                  <button className="trace-btn" onClick={() => void sendPaneInput({ key: "Down" })} disabled={!selectedPane || paneInputBusy}>
+                    Down
+                  </button>
+                  <button className="trace-btn" onClick={() => void sendPaneInput({ key: "Tab" })} disabled={!selectedPane || paneInputBusy}>
+                    Tab
+                  </button>
+                </div>
+              </div>
+              {paneInputBusy ? <p className="trace-note">Sending pane input...</p> : null}
+              {paneInputError ? <p className="trace-error">Pane input failed: {paneInputError}</p> : null}
+              {paneInputLastAction ? <p className="trace-note">last_input={paneInputLastAction}</p> : null}
+              {paneCaptureBusy ? <p className="trace-note">Refreshing pane output...</p> : null}
+              {paneCaptureError ? <p className="trace-error">Pane capture failed: {paneCaptureError}</p> : null}
+              {paneCapturedAt ? <p className="trace-note">captured_at={paneCapturedAt}</p> : null}
+              <pre className="trace-console trace-terminal-console">
+                {paneCaptureText || "No pane output captured yet."}
+              </pre>
+            </div>
+          </div>
         </section>
 
         <section className="trace-panel">
