@@ -1,21 +1,21 @@
 import type {
+  AgentRunResponse,
   BenchmarkReport,
   CandidateSummary,
   CodexAuthStatus,
   OutputChunk,
   ReportListResponse,
-  SmokeRunResponse,
   TaskResponse,
   TimelineEvent,
   TmuxCommandResponse,
 } from "./contracts";
 import {
+  parseAgentRunResponse,
   parseBenchmarkReport,
   parseCandidates,
   parseCodexAuthStatus,
   parseOutput,
   parseReportListResponse,
-  parseSmokeRunResponse,
   parseTaskList,
   parseTaskResponse,
   parseTimeline,
@@ -53,12 +53,17 @@ export type TmuxAddPaneRequest = {
   runner_timeout_sec?: number;
 };
 
-export type SmokeRunStartRequest = {
+export type AgentRunStartRequest = {
   session?: string;
   profiles?: string[];
   target?: string;
   runner_timeout_sec?: number;
   report_id?: string;
+  runner_output_mode?: "codex" | "scripted";
+  runner_task_count?: number;
+  runner_task_prefix?: string;
+  runner_reasoning_effort?: string;
+  runner_codex_prompt?: string;
 };
 
 async function requestJson(path: string, init?: RequestInit): Promise<unknown> {
@@ -171,14 +176,14 @@ export async function fetchCodexAuthStatus(): Promise<CodexAuthStatus> {
   return parseCodexAuthStatus(raw);
 }
 
-export async function postSmokeRun(request: SmokeRunStartRequest): Promise<SmokeRunResponse> {
-  const raw = await postJson("/smoke/runs", request);
-  return parseSmokeRunResponse(raw);
+export async function postAgentRun(request: AgentRunStartRequest): Promise<AgentRunResponse> {
+  const raw = await postJson("/agent/runs", request);
+  return parseAgentRunResponse(raw);
 }
 
-export async function fetchSmokeRun(runId: string): Promise<SmokeRunResponse> {
-  const raw = await getJson(`/smoke/runs/${runId}`);
-  return parseSmokeRunResponse(raw);
+export async function fetchAgentRun(runId: string): Promise<AgentRunResponse> {
+  const raw = await getJson(`/agent/runs/${runId}`);
+  return parseAgentRunResponse(raw);
 }
 
 export async function fetchReports(limit?: number): Promise<ReportListResponse> {

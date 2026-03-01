@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import type { BenchmarkReport, CodexAuthStatus, SmokeRunResponse, TmuxCommandResponse } from "./contracts";
+import type { BenchmarkReport, CodexAuthStatus, AgentRunResponse, TmuxCommandResponse } from "./contracts";
 import {
   fetchCodexAuthStatus,
   fetchCandidates,
   fetchReport,
   fetchReports,
   fetchRunOutput,
-  fetchSmokeRun,
+  fetchAgentRun,
   fetchTasks,
-  postSmokeRun,
+  postAgentRun,
   postTmuxAddLane,
   postTmuxAddPane,
   postTmuxStart,
@@ -44,7 +44,7 @@ function parseProfilesInput(value: string): string[] | undefined {
   return profiles.length > 0 ? profiles : undefined;
 }
 
-function isSmokeTerminal(status: SmokeRunResponse["status"]): boolean {
+function isAgentTerminal(status: AgentRunResponse["status"]): boolean {
   return status === "succeeded" || status === "failed";
 }
 
@@ -64,20 +64,26 @@ export default function App() {
   const [paneWaitForRunner, setPaneWaitForRunner] = useState(true);
   const [paneRunnerTimeoutSec, setPaneRunnerTimeoutSec] = useState("180");
   const [paneTarget, setPaneTarget] = useState("");
-  const [smokeTarget, setSmokeTarget] = useState("");
-  const [smokeProfiles, setSmokeProfiles] = useState("flash,high,extra");
-  const [smokeRunnerTimeoutSec, setSmokeRunnerTimeoutSec] = useState("180");
-  const [smokeReportId, setSmokeReportId] = useState("");
-  const [smokeBusy, setSmokeBusy] = useState(false);
-  const [smokeError, setSmokeError] = useState<string | null>(null);
-  const [smokeRun, setSmokeRun] = useState<SmokeRunResponse | null>(null);
-  const [smokePollTick, setSmokePollTick] = useState(0);
+  const [agentTarget, setAgentTarget] = useState("");
+  const [agentProfiles, setAgentProfiles] = useState("flash,high,extra");
+  const [agentRunnerTimeoutSec, setAgentRunnerTimeoutSec] = useState("180");
+  const [agentReportId, setAgentReportId] = useState("");
+  const [agentOutputMode, setAgentOutputMode] = useState<"codex" | "scripted">("codex");
+  const [agentReasoningEffort, setAgentReasoningEffort] = useState("low");
+  const [agentTaskCount, setAgentTaskCount] = useState("1");
+  const [agentTaskPrefix, setAgentTaskPrefix] = useState("TASK-SMOKE");
+  const [agentInputSource, setAgentInputSource] = useState<"predefined" | "human">("predefined");
+  const [agentHumanPrompt, setAgentHumanPrompt] = useState("");
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [agentRun, setAgentRun] = useState<AgentRunResponse | null>(null);
+  const [agentPollTick, setAgentPollTick] = useState(0);
   const [reportBusy, setReportBusy] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [latestReport, setLatestReport] = useState<BenchmarkReport | null>(null);
   const [latestReportSource, setLatestReportSource] = useState<string | null>(null);
-  const smokePollAttemptRef = useRef(0);
-  const smokePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const agentPollAttemptRef = useRef(0);
+  const agentPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [codexAuthStatus, setCodexAuthStatus] = useState<CodexAuthStatus | null>(null);
   const [codexAuthBusy, setCodexAuthBusy] = useState(false);
   const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
@@ -176,44 +182,53 @@ export default function App() {
     }
   }
 
-  async function refreshSmokeRunStatus(explicitRunId?: string): Promise<void> {
-    const runId = explicitRunId ?? smokeRun?.run_id;
+  async function refreshAgentRunStatus(explicitRunId?: string): Promise<void> {
+    const runId = explicitRunId ?? agentRun?.run_id;
     if (!runId) {
-      setSmokeError("No smoke run id is available yet");
+      setAgentError("No agent run id is available yet");
       return;
     }
 
-    setSmokeBusy(true);
-    setSmokeError(null);
+    setAgentBusy(true);
+    setAgentError(null);
     try {
-      const next = await fetchSmokeRun(runId);
-      setSmokeRun(next);
+      const next = await fetchAgentRun(runId);
+      setAgentRun(next);
     } catch (error) {
-      setSmokeError((error as Error).message);
+      setAgentError((error as Error).message);
     } finally {
-      setSmokeBusy(false);
+      setAgentBusy(false);
     }
   }
 
-  async function runSmokeWorkflow(): Promise<void> {
-    setSmokeBusy(true);
-    setSmokeError(null);
+  async function runAgentWorkflow(): Promise<void> {
+    setAgentBusy(true);
+    setAgentError(null);
     try {
-      await ensureCodexAuthPreflight("smoke-run");
-      const started = await postSmokeRun({
+      await ensureCodexAuthPreflight("agent-run");
+      const started = await postAgentRun({
         session: optionalValue(session),
-        target: optionalValue(smokeTarget) ?? defaultTmuxTarget,
-        profiles: parseProfilesInput(smokeProfiles),
-        runner_timeout_sec: optionalPositiveInt(smokeRunnerTimeoutSec),
-        report_id: optionalValue(smokeReportId),
+        target: optionalValue(agentTarget) ?? defaultTmuxTarget,
+        profiles: parseProfilesInput(agentProfiles),
+        runner_timeout_sec: optionalPositiveInt(agentRunnerTimeoutSec),
+        report_id: optionalValue(agentReportId),
+        runner_output_mode: agentOutputMode,
+        runner_task_count: optionalPositiveInt(agentTaskCount),
+        runner_task_prefix: optionalValue(agentTaskPrefix),
+        runner_reasoning_effort:
+          agentOutputMode === "codex" ? optionalValue(agentReasoningEffort) : undefined,
+        runner_codex_prompt:
+          agentOutputMode === "codex" && agentInputSource === "human"
+            ? optionalValue(agentHumanPrompt)
+            : undefined,
       });
-      smokePollAttemptRef.current = 0;
-      setSmokePollTick(0);
-      setSmokeRun(started);
+      agentPollAttemptRef.current = 0;
+      setAgentPollTick(0);
+      setAgentRun(started);
     } catch (error) {
-      setSmokeError((error as Error).message);
+      setAgentError((error as Error).message);
     } finally {
-      setSmokeBusy(false);
+      setAgentBusy(false);
     }
   }
 
@@ -222,8 +237,8 @@ export default function App() {
     setReportError(null);
 
     try {
-      let reportId = smokeRun?.report_id ?? undefined;
-      let source = "smoke run";
+      let reportId = agentRun?.report_id ?? undefined;
+      let source = "agent run";
 
       if (!reportId) {
         const list = await fetchReports(1);
@@ -251,403 +266,488 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (smokePollTimerRef.current) {
-      clearTimeout(smokePollTimerRef.current);
-      smokePollTimerRef.current = null;
+    if (agentPollTimerRef.current) {
+      clearTimeout(agentPollTimerRef.current);
+      agentPollTimerRef.current = null;
     }
 
-    if (!smokeRun || isSmokeTerminal(smokeRun.status)) {
-      smokePollAttemptRef.current = 0;
+    if (!agentRun || isAgentTerminal(agentRun.status)) {
+      agentPollAttemptRef.current = 0;
       return;
     }
 
-    const runId = smokeRun.run_id;
-    const delaySec = Math.min(1 + smokePollAttemptRef.current, 3);
-    smokePollTimerRef.current = setTimeout(async () => {
-      smokePollAttemptRef.current += 1;
+    const runId = agentRun.run_id;
+    const delaySec = Math.min(1 + agentPollAttemptRef.current, 3);
+    agentPollTimerRef.current = setTimeout(async () => {
+      agentPollAttemptRef.current += 1;
       try {
-        const next = await fetchSmokeRun(runId);
-        setSmokeError(null);
-        setSmokeRun(next);
+        const next = await fetchAgentRun(runId);
+        setAgentError(null);
+        setAgentRun(next);
       } catch (error) {
-        setSmokeError((error as Error).message);
-        setSmokePollTick((value) => value + 1);
+        setAgentError((error as Error).message);
+        setAgentPollTick((value) => value + 1);
       }
     }, delaySec * 1000);
 
     return () => {
-      if (smokePollTimerRef.current) {
-        clearTimeout(smokePollTimerRef.current);
-        smokePollTimerRef.current = null;
+      if (agentPollTimerRef.current) {
+        clearTimeout(agentPollTimerRef.current);
+        agentPollTimerRef.current = null;
       }
     };
-  }, [smokeRun, smokePollTick]);
+  }, [agentRun, agentPollTick]);
 
   return (
-    <main style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", padding: 20 }}>
-      <h1>TRACE Phase 0 Scaffold</h1>
+    <div className="trace-app-shell">
+      <div className="trace-aurora trace-aurora-a" />
+      <div className="trace-aurora trace-aurora-b" />
+      <main className="trace-app">
+        <header className="trace-hero">
+          <p className="trace-eyebrow">TRACE Operator Console</p>
+          <h1>Multi-Agent Control Panel</h1>
+          <p>
+            Start lanes, run agents, monitor status, and review benchmark output from one browser
+            workspace.
+          </p>
+        </header>
 
-      <section>
-        <h2>Orchestration</h2>
-        <p>Control tmux session lifecycle through TRACE API orchestration routes.</p>
-        <p>
-          <button onClick={() => void refreshCodexStatus()} disabled={codexAuthBusy}>
-            Check Codex Auth
-          </button>
-        </p>
-        {codexAuthBusy ? <p>Checking Codex auth...</p> : null}
-        {codexAuthError ? <p>Codex auth check failed: {codexAuthError}</p> : null}
-        {codexAuthStatus ? <p>Auth policy: {codexAuthStatus.policy}</p> : null}
-        {codexAuthStatus ? <pre>{JSON.stringify(codexAuthStatus, null, 2)}</pre> : null}
-        {codexAuthStatus?.requires_login ? (
-          <p>Run one of: {codexAuthStatus.login_commands.join(" | ")}</p>
-        ) : null}
-        <fieldset disabled={Boolean(orchestrationBusy)}>
-          <label>
-            Session:
-            <input value={session} onChange={(event) => setSession(event.target.value)} />
-          </label>
-          <label>
-            Trace Root:
-            <input value={traceRoot} onChange={(event) => setTraceRoot(event.target.value)} />
-          </label>
-          <label>
-            Server Addr:
-            <input value={serverAddr} onChange={(event) => setServerAddr(event.target.value)} />
-          </label>
-          <label>
-            Add-Lane Name:
-            <input value={laneName} onChange={(event) => setLaneName(event.target.value)} />
-          </label>
-          <label>
-            Add-Lane Profile:
-            <input value={laneProfile} onChange={(event) => setLaneProfile(event.target.value)} />
-          </label>
-          <label>
-            Add-Lane Mode:
-            <select value={laneMode} onChange={(event) => setLaneMode(event.target.value)}>
-              <option value="interactive">interactive</option>
-              <option value="runner">runner</option>
-            </select>
-          </label>
-          <label>
-            Add-Lane Wait:
+        <section className="trace-panel trace-panel-wide">
+          <h2>Orchestration</h2>
+          <p>Control tmux session lifecycle through TRACE API orchestration routes.</p>
+          <div className="trace-button-row">
+            <button className="trace-btn trace-btn-primary" onClick={() => void refreshCodexStatus()} disabled={codexAuthBusy}>
+              Check Codex Auth
+            </button>
+            <button
+              className="trace-btn"
+              onClick={() =>
+                runOrchestrationAction("start", () =>
+                  postTmuxStart({
+                    session: optionalValue(session),
+                    trace_root: optionalValue(traceRoot),
+                    addr: optionalValue(serverAddr),
+                  }),
+                )
+              }
+              disabled={Boolean(orchestrationBusy)}
+            >
+              Start Session
+            </button>
+            <button
+              className="trace-btn"
+              onClick={() =>
+                runOrchestrationAction("status", () =>
+                  postTmuxStatus({
+                    session: optionalValue(session),
+                  }),
+                )
+              }
+              disabled={Boolean(orchestrationBusy)}
+            >
+              Status
+            </button>
+            <button
+              className="trace-btn"
+              onClick={() =>
+                runOrchestrationAction("stop", () =>
+                  postTmuxStop({
+                    session: optionalValue(session),
+                  }),
+                )
+              }
+              disabled={Boolean(orchestrationBusy)}
+            >
+              Stop Session
+            </button>
+          </div>
+          {codexAuthBusy ? <p className="trace-note">Checking Codex auth...</p> : null}
+          {codexAuthError ? <p className="trace-error">Codex auth check failed: {codexAuthError}</p> : null}
+          {codexAuthStatus ? <p className="trace-note">Auth policy: {codexAuthStatus.policy}</p> : null}
+          {codexAuthStatus?.requires_login ? (
+            <p className="trace-warning">Run one of: {codexAuthStatus.login_commands.join(" | ")}</p>
+          ) : null}
+          {codexAuthStatus ? <pre className="trace-console">{JSON.stringify(codexAuthStatus, null, 2)}</pre> : null}
+
+          <fieldset className="trace-fieldset" disabled={Boolean(orchestrationBusy)}>
+            <div className="trace-fields">
+              <label className="trace-field">
+                Session:
+                <input value={session} onChange={(event) => setSession(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Trace Root:
+                <input value={traceRoot} onChange={(event) => setTraceRoot(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Server Addr:
+                <input value={serverAddr} onChange={(event) => setServerAddr(event.target.value)} />
+              </label>
+            </div>
+
+            <div className="trace-inline-grid">
+              <h3>Add Lane</h3>
+              <label className="trace-field">
+                Add-Lane Name:
+                <input value={laneName} onChange={(event) => setLaneName(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Add-Lane Profile:
+                <input value={laneProfile} onChange={(event) => setLaneProfile(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Add-Lane Mode:
+                <select value={laneMode} onChange={(event) => setLaneMode(event.target.value)}>
+                  <option value="interactive">interactive</option>
+                  <option value="runner">runner</option>
+                </select>
+              </label>
+              <label className="trace-field trace-checkbox">
+                Add-Lane Wait:
+                <input
+                  type="checkbox"
+                  checked={laneWaitForRunner}
+                  disabled={laneMode !== "runner"}
+                  onChange={(event) => setLaneWaitForRunner(event.target.checked)}
+                />
+              </label>
+              <label className="trace-field">
+                Add-Lane Timeout (s):
+                <input
+                  value={laneRunnerTimeoutSec}
+                  disabled={laneMode !== "runner"}
+                  onChange={(event) => setLaneRunnerTimeoutSec(event.target.value)}
+                />
+              </label>
+              <button
+                className="trace-btn"
+                onClick={() =>
+                  runOrchestrationAction("add-lane", async () => {
+                    await ensureCodexAuthPreflight("add-lane");
+                    return postTmuxAddLane({
+                      session: optionalValue(session),
+                      lane_name: laneName.trim(),
+                      profile: optionalValue(laneProfile),
+                      mode: laneMode === "interactive" ? undefined : laneMode,
+                      wait_for_runner: laneMode === "runner" ? laneWaitForRunner : undefined,
+                      runner_timeout_sec:
+                        laneMode === "runner" ? optionalPositiveInt(laneRunnerTimeoutSec) : undefined,
+                    });
+                  })
+                }
+                disabled={Boolean(orchestrationBusy) || codexAuthBusy}
+              >
+                Add Lane
+              </button>
+            </div>
+
+            <div className="trace-inline-grid">
+              <h3>Add Pane</h3>
+              <label className="trace-field">
+                Add-Pane Name:
+                <input value={paneLaneName} onChange={(event) => setPaneLaneName(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Add-Pane Profile:
+                <input value={paneProfile} onChange={(event) => setPaneProfile(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Add-Pane Mode:
+                <select value={paneMode} onChange={(event) => setPaneMode(event.target.value)}>
+                  <option value="interactive">interactive</option>
+                  <option value="runner">runner</option>
+                </select>
+              </label>
+              <label className="trace-field trace-checkbox">
+                Add-Pane Wait:
+                <input
+                  type="checkbox"
+                  checked={paneWaitForRunner}
+                  disabled={paneMode !== "runner"}
+                  onChange={(event) => setPaneWaitForRunner(event.target.checked)}
+                />
+              </label>
+              <label className="trace-field">
+                Add-Pane Timeout (s):
+                <input
+                  value={paneRunnerTimeoutSec}
+                  disabled={paneMode !== "runner"}
+                  onChange={(event) => setPaneRunnerTimeoutSec(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Add-Pane Target:
+                <input
+                  value={paneTarget}
+                  placeholder={defaultTmuxTarget}
+                  onChange={(event) => setPaneTarget(event.target.value)}
+                />
+              </label>
+              <button
+                className="trace-btn"
+                onClick={() =>
+                  runOrchestrationAction("add-pane", async () => {
+                    await ensureCodexAuthPreflight("add-pane");
+                    return postTmuxAddPane({
+                      session: optionalValue(session),
+                      lane_name: paneLaneName.trim(),
+                      profile: optionalValue(paneProfile),
+                      target: optionalValue(paneTarget) ?? defaultTmuxTarget,
+                      mode: paneMode === "interactive" ? undefined : paneMode,
+                      wait_for_runner: paneMode === "runner" ? paneWaitForRunner : undefined,
+                      runner_timeout_sec:
+                        paneMode === "runner" ? optionalPositiveInt(paneRunnerTimeoutSec) : undefined,
+                    });
+                  })
+                }
+                disabled={Boolean(orchestrationBusy) || codexAuthBusy}
+              >
+                Add Pane
+              </button>
+            </div>
+          </fieldset>
+          {orchestrationBusy ? <p className="trace-note">Running action: {orchestrationBusy}</p> : null}
+          {orchestrationError ? <p className="trace-error">Orchestration failed: {orchestrationError}</p> : null}
+          {orchestrationResult ? (
+            <pre className="trace-console">{JSON.stringify(orchestrationResult, null, 2)}</pre>
+          ) : (
+            <pre className="trace-console">No orchestration command executed yet.</pre>
+          )}
+        </section>
+
+        <section className="trace-panel">
+          <h2>Agent Runs</h2>
+          <p>Run multi-lane agent workflow and poll run status.</p>
+          <fieldset className="trace-fieldset" disabled={agentBusy || Boolean(orchestrationBusy)}>
+            <div className="trace-fields">
+              <label className="trace-field">
+                Session:
+                <input value={session} onChange={(event) => setSession(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Target:
+                <input
+                  value={agentTarget}
+                  placeholder={defaultTmuxTarget}
+                  onChange={(event) => setAgentTarget(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Profiles (comma-separated):
+                <input
+                  value={agentProfiles}
+                  onChange={(event) => setAgentProfiles(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Runner Timeout (s):
+                <input
+                  value={agentRunnerTimeoutSec}
+                  onChange={(event) => setAgentRunnerTimeoutSec(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Report ID (optional):
+                <input value={agentReportId} onChange={(event) => setAgentReportId(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Output Mode:
+                <select
+                  value={agentOutputMode}
+                  onChange={(event) => setAgentOutputMode(event.target.value as "codex" | "scripted")}
+                >
+                  <option value="codex">codex</option>
+                  <option value="scripted">scripted</option>
+                </select>
+              </label>
+              <label className="trace-field">
+                Reasoning Effort:
+                <select
+                  value={agentReasoningEffort}
+                  disabled={agentOutputMode !== "codex"}
+                  onChange={(event) => setAgentReasoningEffort(event.target.value)}
+                >
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                </select>
+              </label>
+              <label className="trace-field">
+                Task Count:
+                <input value={agentTaskCount} onChange={(event) => setAgentTaskCount(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Task Prefix:
+                <input value={agentTaskPrefix} onChange={(event) => setAgentTaskPrefix(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Input Source:
+                <select
+                  value={agentInputSource}
+                  disabled={agentOutputMode !== "codex"}
+                  onChange={(event) => setAgentInputSource(event.target.value as "predefined" | "human")}
+                >
+                  <option value="predefined">predefined</option>
+                  <option value="human">human</option>
+                </select>
+              </label>
+              {agentOutputMode === "codex" && agentInputSource === "human" ? (
+                <label className="trace-field">
+                  Human Prompt:
+                  <textarea
+                    value={agentHumanPrompt}
+                    onChange={(event) => setAgentHumanPrompt(event.target.value)}
+                    rows={4}
+                    placeholder="Describe the task instruction you want agents to run."
+                  />
+                </label>
+              ) : null}
+            </div>
+          </fieldset>
+          <div className="trace-button-row">
+            <button className="trace-btn trace-btn-primary" onClick={() => void runAgentWorkflow()} disabled={agentBusy || codexAuthBusy}>
+              Run Agents
+            </button>
+            <button className="trace-btn" onClick={() => void refreshAgentRunStatus()} disabled={agentBusy || !agentRun?.run_id}>
+              Refresh Status
+            </button>
+            <button className="trace-btn" onClick={() => void viewLatestReport()} disabled={reportBusy}>
+              View Latest Report
+            </button>
+          </div>
+          {agentBusy ? <p className="trace-note">Running agent action...</p> : null}
+          {agentRun && !isAgentTerminal(agentRun.status) ? (
+            <p className="trace-note">Auto-polling status while run is active.</p>
+          ) : null}
+          {agentError ? <p className="trace-error">Agent run failed: {agentError}</p> : null}
+          {agentRun ? (
+            <>
+              <p className="trace-note">
+                run_id={agentRun.run_id} | status={agentRun.status} | step={agentRun.current_step}
+              </p>
+              <p className="trace-note">
+                output_mode={agentRun.runner_output_mode ?? "default"} | reasoning=
+                {agentRun.runner_reasoning_effort ?? "default"} | task_count=
+                {agentRun.runner_task_count ?? "default"} | task_prefix=
+                {agentRun.runner_task_prefix ?? "default"}
+              </p>
+              {agentRun.error ? <p className="trace-error">run error: {agentRun.error}</p> : null}
+              {agentRun.report_id ? <p className="trace-note">report_id={agentRun.report_id}</p> : null}
+              {agentRun.summary ? (
+                <pre className="trace-console">{JSON.stringify(agentRun.summary, null, 2)}</pre>
+              ) : (
+                <pre className="trace-console">No benchmark summary available yet.</pre>
+              )}
+            </>
+          ) : (
+            <pre className="trace-console">No agent run started yet.</pre>
+          )}
+        </section>
+
+        <section className="trace-panel trace-panel-wide">
+          <h2>Latest Report</h2>
+          <p>Fetch the newest benchmark report and render model-level summary.</p>
+          {reportBusy ? <p className="trace-note">Loading report...</p> : null}
+          {reportError ? <p className="trace-error">Report retrieval failed: {reportError}</p> : null}
+          {latestReport ? (
+            <>
+              <p className="trace-note">
+                report_id={latestReport.report_id} | generated_at={latestReport.generated_at} | source=
+                {latestReportSource ?? "n/a"}
+              </p>
+              <p className="trace-note">
+                total_tasks={latestReport.total_tasks} | total_runs={latestReport.total_runs} | total_events=
+                {latestReport.total_events}
+              </p>
+              <div className="trace-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>model_key</th>
+                      <th>provider</th>
+                      <th>model</th>
+                      <th>profile</th>
+                      <th>runs</th>
+                      <th>pass</th>
+                      <th>fail</th>
+                      <th>candidates</th>
+                      <th>eligible</th>
+                      <th>disqualified</th>
+                      <th>output_bytes</th>
+                      <th>avg_duration_ms</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {latestReport.models.map((modelSummary) => (
+                      <tr key={modelSummary.model_key}>
+                        <td>{modelSummary.model_key}</td>
+                        <td>{modelSummary.provider ?? "-"}</td>
+                        <td>{modelSummary.model ?? "-"}</td>
+                        <td>{modelSummary.profile ?? "-"}</td>
+                        <td>{modelSummary.runs}</td>
+                        <td>{modelSummary.pass_count}</td>
+                        <td>{modelSummary.fail_count}</td>
+                        <td>{modelSummary.candidate_total}</td>
+                        <td>{modelSummary.candidate_eligible}</td>
+                        <td>{modelSummary.candidate_disqualified}</td>
+                        <td>{modelSummary.output_bytes}</td>
+                        <td>{modelSummary.avg_duration_ms ?? "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <pre className="trace-console">No report loaded yet.</pre>
+          )}
+        </section>
+
+        <section className="trace-panel">
+          <h2>Tasks</h2>
+          {tasksQuery.isLoading ? <p className="trace-note">Loading tasks...</p> : null}
+          {tasksQuery.error ? <p className="trace-error">Task fetch failed: {(tasksQuery.error as Error).message}</p> : null}
+          <ul className="trace-list">
+            {(tasksQuery.data ?? []).map((task) => (
+              <li key={task.task.task_id}>
+                {task.task.task_id} | {task.status} | {task.task.title}
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="trace-panel">
+          <h2>Candidates</h2>
+          <label className="trace-field trace-checkbox">
             <input
               type="checkbox"
-              checked={laneWaitForRunner}
-              disabled={laneMode !== "runner"}
-              onChange={(event) => setLaneWaitForRunner(event.target.checked)}
+              checked={includeDisqualified}
+              onChange={(event) => setIncludeDisqualified(event.target.checked)}
             />
+            Show stale/disqualified
           </label>
-          <label>
-            Add-Lane Timeout (s):
-            <input
-              value={laneRunnerTimeoutSec}
-              disabled={laneMode !== "runner"}
-              onChange={(event) => setLaneRunnerTimeoutSec(event.target.value)}
-            />
-          </label>
-          <label>
-            Add-Pane Name:
-            <input value={paneLaneName} onChange={(event) => setPaneLaneName(event.target.value)} />
-          </label>
-          <label>
-            Add-Pane Profile:
-            <input value={paneProfile} onChange={(event) => setPaneProfile(event.target.value)} />
-          </label>
-          <label>
-            Add-Pane Mode:
-            <select value={paneMode} onChange={(event) => setPaneMode(event.target.value)}>
-              <option value="interactive">interactive</option>
-              <option value="runner">runner</option>
-            </select>
-          </label>
-          <label>
-            Add-Pane Wait:
-            <input
-              type="checkbox"
-              checked={paneWaitForRunner}
-              disabled={paneMode !== "runner"}
-              onChange={(event) => setPaneWaitForRunner(event.target.checked)}
-            />
-          </label>
-          <label>
-            Add-Pane Timeout (s):
-            <input
-              value={paneRunnerTimeoutSec}
-              disabled={paneMode !== "runner"}
-              onChange={(event) => setPaneRunnerTimeoutSec(event.target.value)}
-            />
-          </label>
-          <label>
-            Add-Pane Target:
-            <input
-              value={paneTarget}
-              placeholder={defaultTmuxTarget}
-              onChange={(event) => setPaneTarget(event.target.value)}
-            />
-          </label>
-        </fieldset>
-        <p>
-          <button
-            onClick={() =>
-              runOrchestrationAction("start", () =>
-                postTmuxStart({
-                  session: optionalValue(session),
-                  trace_root: optionalValue(traceRoot),
-                  addr: optionalValue(serverAddr),
-                }),
-              )
-            }
-            disabled={Boolean(orchestrationBusy)}
-          >
-            Start Session
-          </button>{" "}
-          <button
-            onClick={() =>
-              runOrchestrationAction("status", () =>
-                postTmuxStatus({
-                  session: optionalValue(session),
-                }),
-              )
-            }
-            disabled={Boolean(orchestrationBusy)}
-          >
-            Status
-          </button>{" "}
-          <button
-            onClick={() =>
-              runOrchestrationAction("add-lane", async () => {
-                await ensureCodexAuthPreflight("add-lane");
-                return postTmuxAddLane({
-                  session: optionalValue(session),
-                  lane_name: laneName.trim(),
-                  profile: optionalValue(laneProfile),
-                  mode: laneMode === "interactive" ? undefined : laneMode,
-                  wait_for_runner: laneMode === "runner" ? laneWaitForRunner : undefined,
-                  runner_timeout_sec:
-                    laneMode === "runner" ? optionalPositiveInt(laneRunnerTimeoutSec) : undefined,
-                });
-              })
-            }
-            disabled={Boolean(orchestrationBusy) || codexAuthBusy}
-          >
-            Add Lane
-          </button>{" "}
-          <button
-            onClick={() =>
-              runOrchestrationAction("add-pane", async () => {
-                await ensureCodexAuthPreflight("add-pane");
-                return postTmuxAddPane({
-                  session: optionalValue(session),
-                  lane_name: paneLaneName.trim(),
-                  profile: optionalValue(paneProfile),
-                  target: optionalValue(paneTarget) ?? defaultTmuxTarget,
-                  mode: paneMode === "interactive" ? undefined : paneMode,
-                  wait_for_runner: paneMode === "runner" ? paneWaitForRunner : undefined,
-                  runner_timeout_sec:
-                    paneMode === "runner" ? optionalPositiveInt(paneRunnerTimeoutSec) : undefined,
-                });
-              })
-            }
-            disabled={Boolean(orchestrationBusy) || codexAuthBusy}
-          >
-            Add Pane
-          </button>{" "}
-          <button
-            onClick={() =>
-              runOrchestrationAction("stop", () =>
-                postTmuxStop({
-                  session: optionalValue(session),
-                }),
-              )
-            }
-            disabled={Boolean(orchestrationBusy)}
-          >
-            Stop Session
-          </button>
-        </p>
-        {orchestrationBusy ? <p>Running action: {orchestrationBusy}</p> : null}
-        {orchestrationError ? <p>Orchestration failed: {orchestrationError}</p> : null}
-        {orchestrationResult ? (
-          <pre>{JSON.stringify(orchestrationResult, null, 2)}</pre>
-        ) : (
-          <pre>No orchestration command executed yet.</pre>
-        )}
-      </section>
+          {candidatesQuery.isLoading ? <p className="trace-note">Loading candidates...</p> : null}
+          {candidatesQuery.error ? (
+            <p className="trace-error">Candidate fetch failed: {(candidatesQuery.error as Error).message}</p>
+          ) : null}
+          <ul className="trace-list">
+            {visibleCandidates.map((candidate) => (
+              <li key={candidate.candidate_id}>
+                {candidate.candidate_id} | run={candidate.run_id} | eligible={String(candidate.eligible)}
+                {candidate.disqualified_reason ? ` | reason=${candidate.disqualified_reason}` : ""}
+              </li>
+            ))}
+          </ul>
+        </section>
 
-      <section>
-        <h2>Smoke Workflow</h2>
-        <p>Run multi-lane smoke workflow and poll run status.</p>
-        <fieldset disabled={smokeBusy || Boolean(orchestrationBusy)}>
-          <label>
-            Session:
-            <input value={session} onChange={(event) => setSession(event.target.value)} />
-          </label>
-          <label>
-            Target:
-            <input
-              value={smokeTarget}
-              placeholder={defaultTmuxTarget}
-              onChange={(event) => setSmokeTarget(event.target.value)}
-            />
-          </label>
-          <label>
-            Profiles (comma-separated):
-            <input
-              value={smokeProfiles}
-              onChange={(event) => setSmokeProfiles(event.target.value)}
-            />
-          </label>
-          <label>
-            Runner Timeout (s):
-            <input
-              value={smokeRunnerTimeoutSec}
-              onChange={(event) => setSmokeRunnerTimeoutSec(event.target.value)}
-            />
-          </label>
-          <label>
-            Report ID (optional):
-            <input value={smokeReportId} onChange={(event) => setSmokeReportId(event.target.value)} />
-          </label>
-        </fieldset>
-        <p>
-          <button onClick={() => void runSmokeWorkflow()} disabled={smokeBusy || codexAuthBusy}>
-            Run Smoke
-          </button>{" "}
-          <button
-            onClick={() => void refreshSmokeRunStatus()}
-            disabled={smokeBusy || !smokeRun?.run_id}
-          >
-            Refresh Status
-          </button>{" "}
-          <button onClick={() => void viewLatestReport()} disabled={reportBusy}>
-            View Latest Report
-          </button>
-        </p>
-        {smokeBusy ? <p>Running smoke action...</p> : null}
-        {smokeRun && !isSmokeTerminal(smokeRun.status) ? (
-          <p>Auto-polling status while run is active.</p>
-        ) : null}
-        {smokeError ? <p>Smoke workflow failed: {smokeError}</p> : null}
-        {smokeRun ? (
-          <>
-            <p>
-              run_id={smokeRun.run_id} | status={smokeRun.status} | step={smokeRun.current_step}
-            </p>
-            {smokeRun.error ? <p>run error: {smokeRun.error}</p> : null}
-            {smokeRun.report_id ? <p>report_id={smokeRun.report_id}</p> : null}
-            {smokeRun.summary ? (
-              <pre>{JSON.stringify(smokeRun.summary, null, 2)}</pre>
-            ) : (
-              <pre>No benchmark summary available yet.</pre>
-            )}
-          </>
-        ) : (
-          <pre>No smoke run started yet.</pre>
-        )}
-      </section>
-
-      <section>
-        <h2>Latest Report</h2>
-        <p>Fetch the newest benchmark report and render model-level summary.</p>
-        {reportBusy ? <p>Loading report...</p> : null}
-        {reportError ? <p>Report retrieval failed: {reportError}</p> : null}
-        {latestReport ? (
-          <>
-            <p>
-              report_id={latestReport.report_id} | generated_at={latestReport.generated_at} | source=
-              {latestReportSource ?? "n/a"}
-            </p>
-            <p>
-              total_tasks={latestReport.total_tasks} | total_runs={latestReport.total_runs} | total_events=
-              {latestReport.total_events}
-            </p>
-            <table>
-              <thead>
-                <tr>
-                  <th>model_key</th>
-                  <th>provider</th>
-                  <th>model</th>
-                  <th>profile</th>
-                  <th>runs</th>
-                  <th>pass</th>
-                  <th>fail</th>
-                  <th>candidates</th>
-                  <th>eligible</th>
-                  <th>disqualified</th>
-                  <th>output_bytes</th>
-                  <th>avg_duration_ms</th>
-                </tr>
-              </thead>
-              <tbody>
-                {latestReport.models.map((modelSummary) => (
-                  <tr key={modelSummary.model_key}>
-                    <td>{modelSummary.model_key}</td>
-                    <td>{modelSummary.provider ?? "-"}</td>
-                    <td>{modelSummary.model ?? "-"}</td>
-                    <td>{modelSummary.profile ?? "-"}</td>
-                    <td>{modelSummary.runs}</td>
-                    <td>{modelSummary.pass_count}</td>
-                    <td>{modelSummary.fail_count}</td>
-                    <td>{modelSummary.candidate_total}</td>
-                    <td>{modelSummary.candidate_eligible}</td>
-                    <td>{modelSummary.candidate_disqualified}</td>
-                    <td>{modelSummary.output_bytes}</td>
-                    <td>{modelSummary.avg_duration_ms ?? "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </>
-        ) : (
-          <pre>No report loaded yet.</pre>
-        )}
-      </section>
-
-      <section>
-        <h2>Tasks</h2>
-        {tasksQuery.isLoading ? <p>Loading tasks...</p> : null}
-        {tasksQuery.error ? <p>Task fetch failed: {(tasksQuery.error as Error).message}</p> : null}
-        <ul>
-          {(tasksQuery.data ?? []).map((task) => (
-            <li key={task.task.task_id}>
-              {task.task.task_id} | {task.status} | {task.task.title}
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section>
-        <h2>Candidates</h2>
-        <label>
-          <input
-            type="checkbox"
-            checked={includeDisqualified}
-            onChange={(event) => setIncludeDisqualified(event.target.checked)}
-          />
-          Show stale/disqualified
-        </label>
-        {candidatesQuery.isLoading ? <p>Loading candidates...</p> : null}
-        {candidatesQuery.error ? (
-          <p>Candidate fetch failed: {(candidatesQuery.error as Error).message}</p>
-        ) : null}
-        <ul>
-          {visibleCandidates.map((candidate) => (
-            <li key={candidate.candidate_id}>
-              {candidate.candidate_id} | run={candidate.run_id} | eligible={String(candidate.eligible)}
-              {candidate.disqualified_reason ? ` | reason=${candidate.disqualified_reason}` : ""}
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section>
-        <h2>Run Output</h2>
-        {outputQuery.isLoading ? <p>Loading output...</p> : null}
-        {outputQuery.error ? <p>Output fetch failed: {(outputQuery.error as Error).message}</p> : null}
-        <pre>{outputText}</pre>
-      </section>
-    </main>
+        <section className="trace-panel trace-panel-wide">
+          <h2>Run Output</h2>
+          {outputQuery.isLoading ? <p className="trace-note">Loading output...</p> : null}
+          {outputQuery.error ? <p className="trace-error">Output fetch failed: {(outputQuery.error as Error).message}</p> : null}
+          <pre className="trace-console">{outputText}</pre>
+        </section>
+      </main>
+    </div>
   );
 }

@@ -164,12 +164,12 @@ export const reportListResponseSchema = z
   })
   .strict();
 
-export const smokeRunStatusSchema = z.enum(["queued", "running", "succeeded", "failed"]);
+export const agentRunStatusSchema = z.enum(["queued", "running", "succeeded", "failed"]);
 
-export const smokeRunResponseSchema = z
+export const agentRunResponseSchema = z
   .object({
     run_id: z.string(),
-    status: smokeRunStatusSchema,
+    status: agentRunStatusSchema,
     created_at: z.string(),
     updated_at: z.string(),
     session: z.string(),
@@ -177,6 +177,11 @@ export const smokeRunResponseSchema = z
     profiles: z.array(z.string()),
     lane_names: z.array(z.string()),
     runner_timeout_sec: z.number().int().positive(),
+    runner_output_mode: z.enum(["codex", "scripted"]).optional().nullable(),
+    runner_task_count: z.number().int().positive().optional().nullable(),
+    runner_task_prefix: z.string().optional().nullable(),
+    runner_reasoning_effort: z.string().optional().nullable(),
+    runner_codex_prompt: z.string().optional().nullable(),
     current_step: z.string(),
     error: z.string().optional().nullable(),
     report_id: z.string().optional().nullable(),
@@ -199,5 +204,5 @@ export type BenchmarkRunSummary = z.infer<typeof benchmarkRunSummarySchema>;
 export type BenchmarkReport = z.infer<typeof benchmarkReportSchema>;
 export type ReportListItem = z.infer<typeof reportListItemSchema>;
 export type ReportListResponse = z.infer<typeof reportListResponseSchema>;
-export type SmokeRunStatus = z.infer<typeof smokeRunStatusSchema>;
-export type SmokeRunResponse = z.infer<typeof smokeRunResponseSchema>;
+export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
+export type AgentRunResponse = z.infer<typeof agentRunResponseSchema>;

@@ -76,10 +76,17 @@ EOF_HINTS
 print_runner_hints() {
   cat <<'EOF_HINTS'
 Runner mode env knobs:
+  TRACE_RUNNER_OUTPUT_MODE       codex | scripted (default: codex)
   TRACE_RUNNER_TASK_COUNT        number of tasks to emit (default: 1)
   TRACE_RUNNER_TASK_PREFIX       task prefix (default: TASK-SMOKE)
   TRACE_RUNNER_NONCE             run nonce (default: unix timestamp)
-  TRACE_RUNNER_VERDICT           verdict payload value (default: pass)
+  TRACE_RUNNER_VERDICT           force verdict payload value (default: inferred)
+  TRACE_RUNNER_OUTPUT_MAX_CHARS  truncate captured output to max chars (default: 16000)
+  TRACE_RUNNER_CODEX_MODEL       optional codex model override
+  TRACE_RUNNER_CODEX_PROFILE     optional codex config profile
+  TRACE_RUNNER_CODEX_REASONING_EFFORT codex reasoning effort (default: low)
+  TRACE_RUNNER_CODEX_SANDBOX     codex sandbox mode (default: read-only)
+  TRACE_RUNNER_CODEX_PROMPT      optional extra instruction appended to task prompt
   TRACE_RUNNER_RETRY_ATTEMPTS    request retry attempts (default: 20)
   TRACE_RUNNER_RETRY_DELAY_SEC   retry delay in seconds (default: 1)
   TRACE_RUNNER_READY_TIMEOUT_SEC api readiness wait timeout (default: 30)
@@ -178,22 +185,150 @@ wait_for_api_ready() {
   return 1
 }
 
+validate_runner_output_mode() {
+  case "$1" in
+    codex|scripted)
+      ;;
+    *)
+      echo "TRACE_RUNNER_OUTPUT_MODE must be one of: codex, scripted" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_positive_integer() {
+  local value="$1"
+  local name="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]] || (( value < 1 )); then
+    echo "$name must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+base64_encode() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+build_codex_prompt() {
+  local task_id="$1"
+  local run_id="$2"
+  local index="$3"
+  local task_count="$4"
+  local extra_prompt="${TRACE_RUNNER_CODEX_PROMPT:-}"
+
+  cat <<EOF_PROMPT
+You are Codex lane ${LANE_ID} in TRACE runner mode.
+
+Task metadata:
+- task_id: ${task_id}
+- run_id: ${run_id}
+- lane_profile: ${LANE_PROFILE}
+- task_index: ${index}/${task_count}
+
+Return concise implementation-oriented output for this task:
+1. one short plan (3 bullets max)
+2. one compact code snippet
+3. one verification note
+
+Constraints:
+- plain text or markdown only
+- keep under 1200 words
+- no surrounding commentary
+${extra_prompt}
+EOF_PROMPT
+}
+
+RUNNER_LAST_AGENT_EXIT_CODE=0
+RUNNER_LAST_AGENT_OUTPUT=""
+
+run_codex_task() {
+  local task_id="$1"
+  local run_id="$2"
+  local index="$3"
+  local task_count="$4"
+  local output_file
+  local stdout_file
+  local stderr_file
+  local prompt
+  local sandbox_mode="${TRACE_RUNNER_CODEX_SANDBOX:-read-only}"
+  local reasoning_effort="${TRACE_RUNNER_CODEX_REASONING_EFFORT:-low}"
+  local -a codex_args
+
+  output_file="$(mktemp)"
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+  prompt="$(build_codex_prompt "$task_id" "$run_id" "$index" "$task_count")"
+  RUNNER_LAST_AGENT_OUTPUT=""
+
+  codex_args=(exec --skip-git-repo-check --sandbox "$sandbox_mode" -C "$REPO_ROOT" -o "$output_file")
+  if [[ -n "$reasoning_effort" ]]; then
+    codex_args+=(-c "model_reasoning_effort='${reasoning_effort}'")
+  fi
+  if [[ -n "${TRACE_RUNNER_CODEX_PROFILE:-}" ]]; then
+    codex_args+=(-p "$TRACE_RUNNER_CODEX_PROFILE")
+  fi
+  if [[ -n "${TRACE_RUNNER_CODEX_MODEL:-}" ]]; then
+    codex_args+=(-m "$TRACE_RUNNER_CODEX_MODEL")
+  fi
+  codex_args+=("$prompt")
+
+  if ! command -v codex >/dev/null 2>&1; then
+    RUNNER_LAST_AGENT_EXIT_CODE=127
+    RUNNER_LAST_AGENT_OUTPUT="[codex unavailable] lane=${LANE_ID} task=${task_id} run=${run_id}"
+    rm -f "$output_file" "$stdout_file" "$stderr_file"
+    return 0
+  fi
+
+  if codex "${codex_args[@]}" >"$stdout_file" 2>"$stderr_file"; then
+    RUNNER_LAST_AGENT_EXIT_CODE=0
+    local message
+    message="$(cat "$output_file" 2>/dev/null || true)"
+    if [[ -z "$message" ]]; then
+      message="$(cat "$stdout_file" 2>/dev/null || true)"
+    fi
+    if [[ -z "$message" ]]; then
+      message="[codex produced no output] lane=${LANE_ID} task=${task_id} run=${run_id}"
+    fi
+    RUNNER_LAST_AGENT_OUTPUT="$message"
+  else
+    RUNNER_LAST_AGENT_EXIT_CODE=$?
+    local stderr_text
+    local stdout_text
+    stderr_text="$(cat "$stderr_file" 2>/dev/null || true)"
+    stdout_text="$(cat "$stdout_file" 2>/dev/null || true)"
+    RUNNER_LAST_AGENT_OUTPUT="$(printf '[codex exec failed] exit=%s lane=%s task=%s run=%s\nstderr:\n%s\nstdout:\n%s\n' \
+      "$RUNNER_LAST_AGENT_EXIT_CODE" \
+      "$LANE_ID" \
+      "$task_id" \
+      "$run_id" \
+      "$stderr_text" \
+      "$stdout_text")"
+  fi
+
+  rm -f "$output_file" "$stdout_file" "$stderr_file"
+  return 0
+}
+
 run_scripted_lane() {
+  local output_mode="${TRACE_RUNNER_OUTPUT_MODE:-codex}"
   local task_count="${TRACE_RUNNER_TASK_COUNT:-1}"
   local task_prefix="${TRACE_RUNNER_TASK_PREFIX:-TASK-SMOKE}"
   local nonce="${TRACE_RUNNER_NONCE:-$(date +%s)}"
-  local verdict="${TRACE_RUNNER_VERDICT:-pass}"
+  local forced_verdict="${TRACE_RUNNER_VERDICT:-}"
+  local output_max_chars="${TRACE_RUNNER_OUTPUT_MAX_CHARS:-16000}"
 
-  if ! [[ "$task_count" =~ ^[0-9]+$ ]] || (( task_count < 1 )); then
-    echo "TRACE_RUNNER_TASK_COUNT must be a positive integer" >&2
-    exit 2
-  fi
+  validate_runner_output_mode "$output_mode"
+  validate_positive_integer "$task_count" "TRACE_RUNNER_TASK_COUNT"
+  validate_positive_integer "$output_max_chars" "TRACE_RUNNER_OUTPUT_MAX_CHARS"
 
   echo "[TRACE RUNNER MODE]"
+  echo "output_mode=$output_mode"
   echo "task_count=$task_count"
   echo "task_prefix=$task_prefix"
   echo "nonce=$nonce"
-  echo "verdict=$verdict"
+  if [[ -n "$forced_verdict" ]]; then
+    echo "forced_verdict=$forced_verdict"
+  fi
   echo
 
   wait_for_api_ready
@@ -203,7 +338,10 @@ run_scripted_lane() {
     local task_id="${task_prefix}-${LANE_ID}-${nonce}-${index}"
     local run_id="${LANE_ID}-run-${nonce}-${index}"
     local candidate_id="C-${run_id}"
-    local output_chunk="runner output lane=${LANE_ID} profile=${LANE_PROFILE} task=${task_id}"
+    local output_chunk
+    local output_chunk_base64
+    local verdict
+    local model_name="${TRACE_RUNNER_CODEX_MODEL:-}"
 
     echo "[runner] task $index/$task_count task_id=$task_id run_id=$run_id"
 
@@ -214,12 +352,38 @@ run_scripted_lane() {
 
     post_json \
       "$TRACE_API_BASE_URL/tasks/$task_id/runs/start" \
-      "{\"run_id\":\"$run_id\",\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"profile\":\"$LANE_PROFILE\",\"provider\":\"openai\",\"model\":\"gpt-5-$LANE_PROFILE\"}" \
+      "{\"run_id\":\"$run_id\",\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"profile\":\"$LANE_PROFILE\",\"provider\":\"openai\",\"model\":\"$model_name\"}" \
       >/dev/null
+
+    if [[ "$output_mode" == "codex" ]]; then
+      run_codex_task "$task_id" "$run_id" "$index" "$task_count"
+      output_chunk="$RUNNER_LAST_AGENT_OUTPUT"
+      if [[ -z "$model_name" ]]; then
+        model_name="codex-auto-$LANE_PROFILE"
+      fi
+      if [[ -n "$forced_verdict" ]]; then
+        verdict="$forced_verdict"
+      elif (( RUNNER_LAST_AGENT_EXIT_CODE == 0 )); then
+        verdict="pass"
+      else
+        verdict="fail"
+      fi
+    else
+      output_chunk="runner output lane=${LANE_ID} profile=${LANE_PROFILE} task=${task_id}"
+      if [[ -z "$model_name" ]]; then
+        model_name="scripted-$LANE_PROFILE"
+      fi
+      verdict="${forced_verdict:-pass}"
+    fi
+
+    if (( ${#output_chunk} > output_max_chars )); then
+      output_chunk="${output_chunk:0:output_max_chars}"
+    fi
+    output_chunk_base64="$(base64_encode "$output_chunk")"
 
     post_json \
       "$TRACE_API_BASE_URL/tasks/$task_id/runs/$run_id/output" \
-      "{\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"stream\":\"stdout\",\"encoding\":\"utf8\",\"chunk\":\"$output_chunk\",\"chunk_index\":0,\"final\":true}" \
+      "{\"worker_id\":\"$LANE_ID\",\"lease_epoch\":1,\"stream\":\"stdout\",\"encoding\":\"base64\",\"chunk\":\"$output_chunk_base64\",\"chunk_index\":0,\"final\":true}" \
       >/dev/null
 
     post_json \

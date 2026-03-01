@@ -1,6 +1,9 @@
 # TRACE
 TRACE is a *local-first* harness that binds agent work to tasks, records immutable traces, versions outputs as ChangeSets, evaluates candidates deterministically, and supports recombination/stacking to pick a winner.
 
+## UI Preview
+![TRACE Multi-Agent Control Panel](docs/phase0-ui-screenshot.png)
+
 ## Active Planning Docs
 - [AGENTS.md](/Users/artk/Documents/GitHub/TRACE/AGENTS.md)
 - [BUILD_SEQUENCE_PLAN_v3.md](/Users/artk/Documents/GitHub/TRACE/BUILD_SEQUENCE_PLAN_v3.md)
@@ -97,20 +100,30 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
    - `Status`
    - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
-4. Use the **Smoke Workflow** section:
-   - `Run Smoke` (`POST /smoke/runs`)
-   - `Refresh Status` (`GET /smoke/runs/{run_id}`)
+4. Use the **Agent Runs** section:
+   - `Run Agents` (`POST /agent/runs`)
+   - `Refresh Status` (`GET /agent/runs/{run_id}`)
    - active runs auto-poll until terminal status
+   - runtime controls:
+     - `Output Mode` (`codex` default, `scripted` optional)
+     - `Reasoning Effort`
+     - `Task Count` + `Task Prefix`
+     - `Input Source` (`predefined` or `human`) with optional `Human Prompt`
    - `View Latest Report` (uses `GET /reports` + `GET /reports/{report_id}`)
 
 ## Web UI Status (2026-03-01)
 - Current UI supports:
   - Codex auth preflight check.
   - tmux orchestration controls (`start`, `status`, `add-lane`, `add-pane`, `stop`).
-  - Smoke workflow controls (`Run Smoke`, `Refresh Status`) with automatic active-run polling.
+  - Agent run controls (`Run Agents`, `Refresh Status`) with automatic active-run polling.
+  - Runtime lane controls in Agent Runs panel:
+    - `Output Mode` (`codex|scripted`)
+    - `Reasoning Effort`
+    - `Task Count`, `Task Prefix`
+    - `Input Source` (`predefined|human`) and optional `Human Prompt`
   - Report retrieval/rendering flow (`View Latest Report`) with model summary table.
   - Read-only task/candidate/output views.
-  - Playwright smoke baseline for auth -> smoke -> report flow.
+  - Playwright smoke baseline for auth -> agent run -> report flow.
   - CI Playwright scenario is API-stubbed for stability; real tmux/server verification is tracked in `docs/PHASE0_HUMAN_QA.md`.
 
 ## Codex Auth Policy + Preflight
@@ -191,8 +204,9 @@ scripts/trace-smoke-tmux.sh add-pane codex5 flash trace-smoke:lanes runner
 scripts/trace-smoke-tmux.sh stop
 ```
 
-## Smoke Workflow API Contract
-`POST /smoke/runs`
+## Agent Run API Contract
+`POST /agent/runs`
+  - Legacy alias still accepted: `POST /smoke/runs`
 
 Request JSON:
 - `session` optional string, default `trace-smoke`.
@@ -200,6 +214,11 @@ Request JSON:
 - `target` optional string, default `<session>:lanes`.
 - `runner_timeout_sec` optional integer in `[1, 3600]`, default `180`.
 - `report_id` optional string, sanitized server-side for report filenames.
+- `runner_output_mode` optional enum: `codex | scripted` (runner default is `codex`).
+- `runner_task_count` optional integer in `[1, 50]`.
+- `runner_task_prefix` optional token `[A-Za-z0-9._-]+`.
+- `runner_reasoning_effort` optional token `[A-Za-z0-9._-]+`.
+- `runner_codex_prompt` optional free text (max 4000 chars).
 
 Behavior:
 - Enforces Codex auth policy for lane spawn.
@@ -207,19 +226,26 @@ Behavior:
 - Preflights tmux target via `validate-target`.
 - Rejects concurrent active run per tmux session.
 - Bounds in-memory run history via `TRACE_SMOKE_RUN_HISTORY_LIMIT` (default `200`).
+- Passes runner knobs through tmux lane spawn env:
+  - `TRACE_RUNNER_OUTPUT_MODE`
+  - `TRACE_RUNNER_TASK_COUNT`
+  - `TRACE_RUNNER_TASK_PREFIX`
+  - `TRACE_RUNNER_CODEX_REASONING_EFFORT`
+  - `TRACE_RUNNER_CODEX_PROMPT`
 
 Success response:
 - HTTP `202 Accepted`.
-- Returns queued `SmokeRunResponse` with:
+- Returns queued `AgentRunResponse` with:
   - `run_id`, `status`, `current_step`, `session`, `target`, `profiles`, `lane_names`.
 
-`GET /smoke/runs/{run_id}`
-- Returns current `SmokeRunResponse`.
+`GET /agent/runs/{run_id}`
+- Legacy alias still accepted: `GET /smoke/runs/{run_id}`
+- Returns current `AgentRunResponse`.
 - Terminal success includes:
   - `report_id`, `json_report_path`, `markdown_report_path`, `summary`.
 - Missing run id returns HTTP `404`.
 
-Smoke run states:
+Agent run states:
 - `queued` -> `running` -> (`succeeded` | `failed`)
 - Common `current_step` values:
   - `queued`
@@ -264,19 +290,19 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/status \
 
 scripts/trace-smoke-tmux.sh --session trace-web-smoke validate-target trace-web-smoke:lanes
 
-RUN_ID="$(curl -sS -X POST http://127.0.0.1:18086/smoke/runs \
+RUN_ID="$(curl -sS -X POST http://127.0.0.1:18086/agent/runs \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke","target":"trace-web-smoke:lanes"}' | jq -r '.run_id')"
 
 while true; do
-  STATUS="$(curl -sS "http://127.0.0.1:18086/smoke/runs/$RUN_ID" | tee /tmp/trace-smoke-run.json | jq -r '.status')"
+  STATUS="$(curl -sS "http://127.0.0.1:18086/agent/runs/$RUN_ID" | tee /tmp/trace-agent-run.json | jq -r '.status')"
   if [[ "$STATUS" == "succeeded" || "$STATUS" == "failed" ]]; then
     break
   fi
   sleep 1
 done
 
-cat /tmp/trace-smoke-run.json | jq .
+cat /tmp/trace-agent-run.json | jq .
 
 curl -sS http://127.0.0.1:18086/reports?limit=1 | jq .
 
@@ -287,33 +313,38 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/stop \
 
 Note:
 - `/reports` APIs are implemented and are the supported browser retrieval path.
-- `json_report_path` / `markdown_report_path` are still returned by smoke status for operator debugging.
+- `json_report_path` / `markdown_report_path` are still returned by agent run status for operator debugging.
 
 ## Troubleshooting
 - `412 Precondition Failed` on `add-lane`/`add-pane`:
   - Codex auth policy is `required` and `codex login status` is not logged in.
-- `409 Conflict` from `POST /smoke/runs` with `smoke run already active`:
-  - Another smoke run is already active for that tmux session.
-- `409 Conflict` from `POST /smoke/runs` mentioning `status`:
+- `409 Conflict` from `POST /agent/runs` with `agent run already active`:
+  - Another agent run is already active for that tmux session.
+- `409 Conflict` from `POST /agent/runs` mentioning `status`:
   - tmux session preflight failed; start session first.
-- `409 Conflict` from `POST /smoke/runs` mentioning `validate-target`:
+- `409 Conflict` from `POST /agent/runs` mentioning `validate-target`:
   - target pane/window does not exist; validate or adjust target.
 - `409 Conflict` mentioning `history limit reached`:
   - increase `TRACE_SMOKE_RUN_HISTORY_LIMIT` or wait for terminal runs to be pruned.
 - `400 Bad Request` on smoke start:
-  - invalid token characters in `session`/`profiles`/`target`, or invalid `runner_timeout_sec`.
+  - invalid token characters in `session`/`profiles`/`target`/`runner_task_prefix`/`runner_reasoning_effort`, invalid `runner_timeout_sec`, invalid `runner_task_count`, or oversized/empty `runner_codex_prompt`.
+- Synthetic vs real output:
+  - `runner_output_mode=codex` produces real Codex-generated lane output.
+  - `runner_output_mode=scripted` is intentionally synthetic plumbing output.
+- TODO (scripted mode hardcoding):
+  - Replace hardcoded scripted output text with markdown-driven instructions (for example, per-run `*.md` prompt input from UI/API) so scripted mode can exercise user-authored agent instructions instead of fixed placeholder content.
 
 ## Current Status
 - Monorepo scaffold is in place (Rust + TypeScript workspace).
 - Read-side API projections from canonical event log are implemented.
 - tmux orchestration routes are implemented in backend and wired into web UI controls.
 - Smoke workflow API is implemented:
-  - `POST /smoke/runs`
-  - `GET /smoke/runs/{run_id}`
+  - `POST /agent/runs` (legacy alias: `/smoke/runs`)
+  - `GET /agent/runs/{run_id}` (legacy alias: `/smoke/runs/{run_id}`)
 - Report retrieval APIs are implemented:
   - `GET /reports`
   - `GET /reports/{report_id}`
-- Web UI now supports smoke run trigger/poll and latest report retrieval/rendering.
+- Web UI now supports agent run trigger/poll and latest report retrieval/rendering.
 - Playwright E2E smoke is implemented and CI-gated.
 - Phase 0 sign-off artifacts are tracked under:
   - [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)

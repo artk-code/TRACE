@@ -41,17 +41,23 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - `GET /orchestrator/auth/codex/status`
 - Backend tmux orchestration endpoints exist:
   - `POST /orchestrator/tmux/start|status|add-lane|add-pane|stop`
-- Backend smoke workflow endpoints exist:
-  - `POST /smoke/runs`
-  - `GET /smoke/runs/{run_id}`
+- Backend agent workflow endpoints exist:
+  - `POST /agent/runs` (legacy alias: `POST /smoke/runs`)
+  - `GET /agent/runs/{run_id}` (legacy alias: `GET /smoke/runs/{run_id}`)
   - workflow preflights tmux session+target and writes benchmark report on completion
+  - per-run lane knobs:
+    - `runner_output_mode` (`codex|scripted`)
+    - `runner_task_count`
+    - `runner_task_prefix`
+    - `runner_reasoning_effort`
+    - `runner_codex_prompt`
 - Backend lane-spawn auth enforcement exists:
   - `TRACE_CODEX_AUTH_POLICY=required|optional` (default: `required`)
   - `add-lane`/`add-pane` are blocked when auth is required and Codex is not logged in
 - Smoke run history is bounded:
   - `TRACE_SMOKE_RUN_HISTORY_LIMIT` (default: `200`)
 - Web UI can call tmux orchestration endpoints and display command results/errors.
-- Web UI can trigger smoke workflow runs and poll smoke status from browser controls.
+- Web UI can trigger agent workflow runs and poll run status from browser controls.
 - Web UI can fetch/render latest benchmark report summaries from `/reports` APIs.
 - Browser E2E smoke harness exists (Playwright) and CI runs `pnpm --dir web test:e2e`.
 
@@ -68,10 +74,11 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Typed claim/run/output/candidate/release paths are active and fenced.
 - tmux orchestration routes are active and validated for basic inputs.
 - tmux add-lane/add-pane are auth-gated server-side when `TRACE_CODEX_AUTH_POLICY=required`.
-- Smoke workflow API coordinates multi-lane runner launch, wait, and benchmark writeback.
+- Agent workflow API coordinates multi-lane runner launch, wait, and benchmark writeback.
+- Default `/agent/runs` output mode is `codex` (real model output); `scripted` remains available for plumbing/debug.
 - Report retrieval APIs expose benchmark JSON over HTTP for browser consumption.
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop and auth preflight status.
-- Web UI includes smoke workflow controls for `Run Smoke` + `Refresh Status` with automatic active-run polling.
+- Web UI includes agent workflow controls for `Run Agents` + `Refresh Status` with automatic active-run polling.
 - Web UI includes `View Latest Report` with latest-report fetch and model summary table rendering.
 - Playwright E2E covers auth check -> smoke run -> terminal status -> report visibility and is wired into CI.
 - Lane shells support two execution modes:
@@ -86,6 +93,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 ## Post-Phase0 Gaps
 - Smoke workflow currently requires an existing tmux session and valid target (`session` + `target` preflight).
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
+- `runner_output_mode=scripted` still uses hardcoded synthetic content; TODO: support markdown-based instruction input so scripted mode can run user-supplied agent instructions instead of fixed strings.
 - No seeded deterministic task/eval pack with expected-output contract.
 - CLI remains read-oriented (`tasks`, `task`) and not smoke-run capable.
 - No merge/PR pipeline from winning or stacked candidates.
@@ -156,6 +164,7 @@ Prerequisite:
 - Keep `run_id` globally unique (not just per task).
 - Use wrapper scripts for pane/window creation instead of raw tmux command strings.
 - Use `mode=runner` when you want scripted writes; default lane mode remains interactive.
+- For browser-triggered runs, prefer `runner_output_mode=codex` for real agent output.
 - Do not treat benchmark pass/fail as authoritative quality until deterministic evaluator lands.
 
 ## Core Contracts

@@ -8,6 +8,11 @@ LANE_BOOTSTRAP="$SCRIPT_DIR/trace-lane-shell.sh"
 SESSION="${TRACE_TMUX_SESSION:-trace-smoke}"
 TRACE_ROOT_VALUE="${TRACE_ROOT:-$REPO_ROOT/.trace-smoke}"
 TRACE_SERVER_ADDR_VALUE="${TRACE_SERVER_ADDR:-127.0.0.1:18080}"
+TRACE_RUNNER_OUTPUT_MODE_VALUE="${TRACE_RUNNER_OUTPUT_MODE:-}"
+TRACE_RUNNER_TASK_COUNT_VALUE="${TRACE_RUNNER_TASK_COUNT:-}"
+TRACE_RUNNER_TASK_PREFIX_VALUE="${TRACE_RUNNER_TASK_PREFIX:-}"
+TRACE_RUNNER_REASONING_EFFORT_VALUE="${TRACE_RUNNER_CODEX_REASONING_EFFORT:-}"
+TRACE_RUNNER_CODEX_PROMPT_VALUE="${TRACE_RUNNER_CODEX_PROMPT:-}"
 TRACE_ROOT_EXPLICIT=0
 TRACE_ADDR_EXPLICIT=0
 
@@ -22,6 +27,16 @@ Global options (must appear before command):
   --session <name>       tmux session name (default: $SESSION)
   --trace-root <path>    TRACE_ROOT for all panes (default: $TRACE_ROOT_VALUE)
   --addr <host:port>     TRACE_SERVER_ADDR (default: $TRACE_SERVER_ADDR_VALUE)
+  --runner-output-mode <mode>
+                          TRACE_RUNNER_OUTPUT_MODE for spawned runner panes
+  --runner-task-count <n>
+                          TRACE_RUNNER_TASK_COUNT for spawned runner panes
+  --runner-task-prefix <prefix>
+                          TRACE_RUNNER_TASK_PREFIX for spawned runner panes
+  --runner-reasoning-effort <value>
+                          TRACE_RUNNER_CODEX_REASONING_EFFORT for spawned runner panes
+  --runner-codex-prompt <text>
+                          TRACE_RUNNER_CODEX_PROMPT for spawned runner panes
 
 Commands:
   start [--no-attach]
@@ -91,20 +106,37 @@ build_lane_cmd() {
   local lane="$2"
   local profile="$3"
   local mode="${4:-interactive}"
+  local -a cmd
+
   if [[ "$mode" == "runner" ]]; then
-    printf "%q %q %q %q %q %q %q %q %q %q" \
-      "env" \
-      "TRACE_RUNNER_EXIT_AFTER_RUN=1" \
-      "$LANE_BOOTSTRAP" \
-      "$lane" \
-      "$profile" \
-      "$REPO_ROOT" \
-      "$TRACE_ROOT_VALUE" \
-      "$TRACE_SERVER_ADDR_VALUE" \
-      "$role" \
+    cmd=("env" "TRACE_RUNNER_EXIT_AFTER_RUN=1")
+    if [[ -n "$TRACE_RUNNER_OUTPUT_MODE_VALUE" ]]; then
+      cmd+=("TRACE_RUNNER_OUTPUT_MODE=$TRACE_RUNNER_OUTPUT_MODE_VALUE")
+    fi
+    if [[ -n "$TRACE_RUNNER_TASK_COUNT_VALUE" ]]; then
+      cmd+=("TRACE_RUNNER_TASK_COUNT=$TRACE_RUNNER_TASK_COUNT_VALUE")
+    fi
+    if [[ -n "$TRACE_RUNNER_TASK_PREFIX_VALUE" ]]; then
+      cmd+=("TRACE_RUNNER_TASK_PREFIX=$TRACE_RUNNER_TASK_PREFIX_VALUE")
+    fi
+    if [[ -n "$TRACE_RUNNER_REASONING_EFFORT_VALUE" ]]; then
+      cmd+=("TRACE_RUNNER_CODEX_REASONING_EFFORT=$TRACE_RUNNER_REASONING_EFFORT_VALUE")
+    fi
+    if [[ -n "$TRACE_RUNNER_CODEX_PROMPT_VALUE" ]]; then
+      cmd+=("TRACE_RUNNER_CODEX_PROMPT=$TRACE_RUNNER_CODEX_PROMPT_VALUE")
+    fi
+    cmd+=(
+      "$LANE_BOOTSTRAP"
+      "$lane"
+      "$profile"
+      "$REPO_ROOT"
+      "$TRACE_ROOT_VALUE"
+      "$TRACE_SERVER_ADDR_VALUE"
+      "$role"
       "$mode"
+    )
   else
-    printf "%q %q %q %q %q %q %q %q" \
+    cmd=(
       "$LANE_BOOTSTRAP" \
       "$lane" \
       "$profile" \
@@ -113,7 +145,21 @@ build_lane_cmd() {
       "$TRACE_SERVER_ADDR_VALUE" \
       "$role" \
       "$mode"
+    )
   fi
+
+  local quoted=""
+  local arg
+  for arg in "${cmd[@]}"; do
+    local escaped
+    escaped="$(printf "%q" "$arg")"
+    if [[ -z "$quoted" ]]; then
+      quoted="$escaped"
+    else
+      quoted="$quoted $escaped"
+    fi
+  done
+  printf "%s" "$quoted"
 }
 
 configure_lane_pane() {
@@ -156,6 +202,46 @@ parse_global_options() {
         fi
         TRACE_SERVER_ADDR_VALUE="$2"
         TRACE_ADDR_EXPLICIT=1
+        shift 2
+        ;;
+      --runner-output-mode)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --runner-output-mode" >&2
+          exit 2
+        fi
+        TRACE_RUNNER_OUTPUT_MODE_VALUE="$2"
+        shift 2
+        ;;
+      --runner-task-count)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --runner-task-count" >&2
+          exit 2
+        fi
+        TRACE_RUNNER_TASK_COUNT_VALUE="$2"
+        shift 2
+        ;;
+      --runner-task-prefix)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --runner-task-prefix" >&2
+          exit 2
+        fi
+        TRACE_RUNNER_TASK_PREFIX_VALUE="$2"
+        shift 2
+        ;;
+      --runner-reasoning-effort)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --runner-reasoning-effort" >&2
+          exit 2
+        fi
+        TRACE_RUNNER_REASONING_EFFORT_VALUE="$2"
+        shift 2
+        ;;
+      --runner-codex-prompt)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --runner-codex-prompt" >&2
+          exit 2
+        fi
+        TRACE_RUNNER_CODEX_PROMPT_VALUE="$2"
         shift 2
         ;;
       *)
@@ -223,6 +309,21 @@ start_session() {
   tmux set-environment -t "$SESSION" TRACE_SERVER_ADDR "$TRACE_SERVER_ADDR_VALUE"
   tmux set-environment -t "$SESSION" TRACE_API_BASE_URL "http://$TRACE_SERVER_ADDR_VALUE"
   tmux set-environment -t "$SESSION" TRACE_REPO_ROOT "$REPO_ROOT"
+  if [[ -n "$TRACE_RUNNER_OUTPUT_MODE_VALUE" ]]; then
+    tmux set-environment -t "$SESSION" TRACE_RUNNER_OUTPUT_MODE "$TRACE_RUNNER_OUTPUT_MODE_VALUE"
+  fi
+  if [[ -n "$TRACE_RUNNER_TASK_COUNT_VALUE" ]]; then
+    tmux set-environment -t "$SESSION" TRACE_RUNNER_TASK_COUNT "$TRACE_RUNNER_TASK_COUNT_VALUE"
+  fi
+  if [[ -n "$TRACE_RUNNER_TASK_PREFIX_VALUE" ]]; then
+    tmux set-environment -t "$SESSION" TRACE_RUNNER_TASK_PREFIX "$TRACE_RUNNER_TASK_PREFIX_VALUE"
+  fi
+  if [[ -n "$TRACE_RUNNER_REASONING_EFFORT_VALUE" ]]; then
+    tmux set-environment -t "$SESSION" TRACE_RUNNER_CODEX_REASONING_EFFORT "$TRACE_RUNNER_REASONING_EFFORT_VALUE"
+  fi
+  if [[ -n "$TRACE_RUNNER_CODEX_PROMPT_VALUE" ]]; then
+    tmux set-environment -t "$SESSION" TRACE_RUNNER_CODEX_PROMPT "$TRACE_RUNNER_CODEX_PROMPT_VALUE"
+  fi
 
   tmux new-window -t "${SESSION}:" -n lanes "$(build_lane_cmd lane flash flash interactive)"
   tmux split-window -t "${SESSION}:lanes" -h "$(build_lane_cmd lane high high interactive)"
@@ -268,6 +369,10 @@ status_session() {
   echo "session config:"
   echo "TRACE_ROOT=$(session_env_value TRACE_ROOT || echo "<unset>")"
   echo "TRACE_SERVER_ADDR=$(session_env_value TRACE_SERVER_ADDR || echo "<unset>")"
+  echo "TRACE_RUNNER_OUTPUT_MODE=$(session_env_value TRACE_RUNNER_OUTPUT_MODE || echo "<unset>")"
+  echo "TRACE_RUNNER_TASK_COUNT=$(session_env_value TRACE_RUNNER_TASK_COUNT || echo "<unset>")"
+  echo "TRACE_RUNNER_TASK_PREFIX=$(session_env_value TRACE_RUNNER_TASK_PREFIX || echo "<unset>")"
+  echo "TRACE_RUNNER_CODEX_REASONING_EFFORT=$(session_env_value TRACE_RUNNER_CODEX_REASONING_EFFORT || echo "<unset>")"
 }
 
 validate_target() {

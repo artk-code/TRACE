@@ -11,9 +11,9 @@ function respondJson(route: Route, body: unknown, status = 200): Promise<void> {
   });
 }
 
-test("phase0 smoke flow: auth check to smoke run to report view", async ({ page }) => {
-  const smokeRunId = "smoke-e2e-run";
-  let smokeStatusPolls = 0;
+test("phase0 agent flow: auth check to agent run to report view", async ({ page }) => {
+  const agentRunId = "agent-e2e-run";
+  let agentStatusPolls = 0;
 
   const authStatus = {
     command: "codex login status",
@@ -42,19 +42,19 @@ test("phase0 smoke flow: auth check to smoke run to report view", async ({ page 
     return respondJson(route, authStatus);
   });
 
-  await page.route("**/smoke/runs", async (route) => {
+  await page.route("**/agent/runs", async (route) => {
     if (route.request().method() !== "POST") {
       return route.fallback();
     }
     return respondJson(route, {
-      run_id: smokeRunId,
+      run_id: agentRunId,
       status: "queued",
       created_at: "2026-03-01T09:00:00Z",
       updated_at: "2026-03-01T09:00:00Z",
       session: "trace-smoke",
       target: "trace-smoke:lanes",
       profiles: ["flash", "high", "extra"],
-      lane_names: ["smoke-flash", "smoke-high", "smoke-extra"],
+      lane_names: ["agent-flash", "agent-high", "agent-extra"],
       runner_timeout_sec: 180,
       current_step: "queued",
       error: null,
@@ -65,21 +65,21 @@ test("phase0 smoke flow: auth check to smoke run to report view", async ({ page 
     });
   });
 
-  await page.route(`**/smoke/runs/${smokeRunId}`, async (route) => {
+  await page.route(`**/agent/runs/${agentRunId}`, async (route) => {
     if (route.request().method() !== "GET") {
       return route.fallback();
     }
-    smokeStatusPolls += 1;
-    if (smokeStatusPolls === 1) {
+    agentStatusPolls += 1;
+    if (agentStatusPolls === 1) {
       return respondJson(route, {
-        run_id: smokeRunId,
+        run_id: agentRunId,
         status: "running",
         created_at: "2026-03-01T09:00:00Z",
         updated_at: "2026-03-01T09:00:01Z",
         session: "trace-smoke",
         target: "trace-smoke:lanes",
         profiles: ["flash", "high", "extra"],
-        lane_names: ["smoke-flash", "smoke-high", "smoke-extra"],
+        lane_names: ["agent-flash", "agent-high", "agent-extra"],
         runner_timeout_sec: 180,
         current_step: "waiting_for_lanes",
         error: null,
@@ -90,14 +90,14 @@ test("phase0 smoke flow: auth check to smoke run to report view", async ({ page 
       });
     }
     return respondJson(route, {
-      run_id: smokeRunId,
+      run_id: agentRunId,
       status: "succeeded",
       created_at: "2026-03-01T09:00:00Z",
       updated_at: "2026-03-01T09:00:03Z",
       session: "trace-smoke",
       target: "trace-smoke:lanes",
       profiles: ["flash", "high", "extra"],
-      lane_names: ["smoke-flash", "smoke-high", "smoke-extra"],
+      lane_names: ["agent-flash", "agent-high", "agent-extra"],
       runner_timeout_sec: 180,
       current_step: "completed",
       error: null,
@@ -216,8 +216,8 @@ test("phase0 smoke flow: auth check to smoke run to report view", async ({ page 
   await page.getByRole("button", { name: "Check Codex Auth" }).click();
   await expect(page.getByText("Auth policy: required")).toBeVisible();
 
-  await page.getByRole("button", { name: "Run Smoke" }).click();
-  await expect(page.getByText(`run_id=${smokeRunId}`)).toBeVisible();
+  await page.getByRole("button", { name: "Run Agents" }).click();
+  await expect(page.getByText(`run_id=${agentRunId}`)).toBeVisible();
   await expect(page.getByText("status=succeeded")).toBeVisible();
   await expect(page.getByText("report_id=report-e2e")).toBeVisible();
 

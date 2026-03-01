@@ -11,10 +11,10 @@ function respondJson(route: Route, body: unknown, status = 200): Promise<void> {
   });
 }
 
-test("phase0 auth remediation: required policy blocks smoke run with actionable command", async ({
+test("phase0 auth remediation: required policy blocks agent run with actionable command", async ({
   page,
 }) => {
-  let smokeStartCalled = false;
+  let agentStartCalled = false;
 
   await page.route("**/tasks", async (route) => {
     if (route.request().method() !== "GET") {
@@ -41,11 +41,11 @@ test("phase0 auth remediation: required policy blocks smoke run with actionable 
     });
   });
 
-  await page.route("**/smoke/runs", async (route) => {
+  await page.route("**/agent/runs", async (route) => {
     if (route.request().method() !== "POST") {
       return route.fallback();
     }
-    smokeStartCalled = true;
+    agentStartCalled = true;
     return respondJson(route, { error: "unexpected smoke start" }, 500);
   });
 
@@ -54,11 +54,11 @@ test("phase0 auth remediation: required policy blocks smoke run with actionable 
   await page.getByRole("button", { name: "Check Codex Auth" }).click();
   await expect(page.getByText("Run one of: codex login | codex login --device-auth")).toBeVisible();
 
-  const smokeSection = page.locator("section", { hasText: "Smoke Workflow" }).first();
-  await smokeSection.getByRole("button", { name: "Run Smoke" }).click();
+  const agentSection = page.locator("section", { hasText: "Agent Runs" }).first();
+  await agentSection.getByRole("button", { name: "Run Agents" }).click();
 
   await expect(
-    smokeSection.getByText("Smoke workflow failed: Codex auth required before smoke-run. Run: codex login"),
+    agentSection.getByText("Agent run failed: Codex auth required before agent-run. Run: codex login"),
   ).toBeVisible();
-  expect(smokeStartCalled).toBe(false);
+  expect(agentStartCalled).toBe(false);
 });

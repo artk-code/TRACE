@@ -55,6 +55,8 @@ const DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC: u64 = 180;
 const DEFAULT_SMOKE_RUN_HISTORY_LIMIT: usize = 200;
 const DEFAULT_REPORT_LIST_LIMIT: usize = 50;
 const MAX_REPORT_LIST_LIMIT: usize = 200;
+const MAX_RUNNER_TASK_COUNT: u64 = 50;
+const MAX_RUNNER_CODEX_PROMPT_CHARS: usize = 4000;
 const DEFAULT_SMOKE_PROFILES: [&str; 3] = ["flash", "high", "extra"];
 static SMOKE_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -648,6 +650,11 @@ struct SmokeRunStartRequest {
     target: Option<String>,
     runner_timeout_sec: Option<u64>,
     report_id: Option<String>,
+    runner_output_mode: Option<String>,
+    runner_task_count: Option<u64>,
+    runner_task_prefix: Option<String>,
+    runner_reasoning_effort: Option<String>,
+    runner_codex_prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -706,6 +713,11 @@ struct SmokeRunRecord {
     profiles: Vec<String>,
     lane_names: Vec<String>,
     runner_timeout_sec: u64,
+    runner_output_mode: Option<String>,
+    runner_task_count: Option<u64>,
+    runner_task_prefix: Option<String>,
+    runner_reasoning_effort: Option<String>,
+    runner_codex_prompt: Option<String>,
     current_step: String,
     error: Option<String>,
     benchmark: Option<BenchmarkEvaluateResponse>,
@@ -722,6 +734,11 @@ struct SmokeRunResponse {
     profiles: Vec<String>,
     lane_names: Vec<String>,
     runner_timeout_sec: u64,
+    runner_output_mode: Option<String>,
+    runner_task_count: Option<u64>,
+    runner_task_prefix: Option<String>,
+    runner_reasoning_effort: Option<String>,
+    runner_codex_prompt: Option<String>,
     current_step: String,
     error: Option<String>,
     report_id: Option<String>,
@@ -876,6 +893,8 @@ fn app_router_with_tmux_script(
         )
         .route("/reports", get(get_reports_handler))
         .route("/reports/{report_id}", get(get_report_handler))
+        .route("/agent/runs", post(post_agent_run_handler))
+        .route("/agent/runs/{run_id}", get(get_agent_run_handler))
         .route("/smoke/runs", post(post_smoke_run_handler))
         .route("/smoke/runs/{run_id}", get(get_smoke_run_handler))
         .route("/orchestrator/tmux/start", post(post_tmux_start_handler))
@@ -1045,6 +1064,42 @@ fn validate_runner_timeout(timeout_sec: u64) -> Result<(), (StatusCode, Json<Api
             "runner_timeout_sec must be between 1 and 3600",
         ))
     }
+}
+
+fn validate_runner_output_mode(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    match value {
+        "codex" | "scripted" => Ok(()),
+        _ => Err(bad_request_error(
+            "runner_output_mode must be one of: codex, scripted",
+        )),
+    }
+}
+
+fn validate_runner_task_count(value: u64) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if (1..=MAX_RUNNER_TASK_COUNT).contains(&value) {
+        Ok(())
+    } else {
+        Err(bad_request_error(format!(
+            "runner_task_count must be between 1 and {MAX_RUNNER_TASK_COUNT}"
+        )))
+    }
+}
+
+fn validate_runner_codex_prompt(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if value.trim().is_empty() {
+        return Err(bad_request_error("runner_codex_prompt cannot be empty"));
+    }
+    if value.len() > MAX_RUNNER_CODEX_PROMPT_CHARS {
+        return Err(bad_request_error(format!(
+            "runner_codex_prompt exceeds max length ({MAX_RUNNER_CODEX_PROMPT_CHARS})"
+        )));
+    }
+    if value.contains('\0') {
+        return Err(bad_request_error(
+            "runner_codex_prompt contains invalid characters",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_trace_root(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
@@ -1273,7 +1328,7 @@ fn generate_smoke_run_id() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("smoke-{epoch_ms}-{serial}")
+    format!("agent-{epoch_ms}-{serial}")
 }
 
 fn build_smoke_lane_names(run_id: &str, profiles: &[String]) -> Vec<String> {
@@ -1294,7 +1349,7 @@ fn build_smoke_lane_names(run_id: &str, profiles: &[String]) -> Vec<String> {
 
     profiles
         .iter()
-        .map(|profile| format!("smoke-{profile}-{lane_suffix}"))
+        .map(|profile| format!("agent-{profile}-{lane_suffix}"))
         .collect()
 }
 
@@ -1321,6 +1376,11 @@ fn smoke_run_response(record: &SmokeRunRecord) -> SmokeRunResponse {
         profiles: record.profiles.clone(),
         lane_names: record.lane_names.clone(),
         runner_timeout_sec: record.runner_timeout_sec,
+        runner_output_mode: record.runner_output_mode.clone(),
+        runner_task_count: record.runner_task_count,
+        runner_task_prefix: record.runner_task_prefix.clone(),
+        runner_reasoning_effort: record.runner_reasoning_effort.clone(),
+        runner_codex_prompt: record.runner_codex_prompt.clone(),
         current_step: record.current_step.clone(),
         error: record.error.clone(),
         report_id,
@@ -1476,26 +1536,47 @@ async fn run_smoke_workflow(
     profiles: Vec<String>,
     lane_names: Vec<String>,
     runner_timeout_sec: u64,
+    runner_output_mode: Option<String>,
+    runner_task_count: Option<u64>,
+    runner_task_prefix: Option<String>,
+    runner_reasoning_effort: Option<String>,
+    runner_codex_prompt: Option<String>,
     report_id_override: Option<String>,
     start_global_seq: u64,
 ) {
     set_smoke_run_running(&state, &run_id, "spawning_lanes").await;
 
     for (lane_name, profile) in lane_names.iter().zip(profiles.iter()) {
-        if let Err(error) = execute_tmux_script_result(
-            &state,
-            vec![
-                "--session".to_string(),
-                session.clone(),
-                "add-pane".to_string(),
-                lane_name.clone(),
-                profile.clone(),
-                target.clone(),
-                "runner".to_string(),
-            ],
-        )
-        .await
-        {
+        let mut add_pane_args = vec!["--session".to_string(), session.clone()];
+        if let Some(output_mode) = &runner_output_mode {
+            add_pane_args.push("--runner-output-mode".to_string());
+            add_pane_args.push(output_mode.clone());
+        }
+        if let Some(task_count) = runner_task_count {
+            add_pane_args.push("--runner-task-count".to_string());
+            add_pane_args.push(task_count.to_string());
+        }
+        if let Some(task_prefix) = &runner_task_prefix {
+            add_pane_args.push("--runner-task-prefix".to_string());
+            add_pane_args.push(task_prefix.clone());
+        }
+        if let Some(reasoning_effort) = &runner_reasoning_effort {
+            add_pane_args.push("--runner-reasoning-effort".to_string());
+            add_pane_args.push(reasoning_effort.clone());
+        }
+        if let Some(codex_prompt) = &runner_codex_prompt {
+            add_pane_args.push("--runner-codex-prompt".to_string());
+            add_pane_args.push(codex_prompt.clone());
+        }
+        add_pane_args.extend([
+            "add-pane".to_string(),
+            lane_name.clone(),
+            profile.clone(),
+            target.clone(),
+            "runner".to_string(),
+        ]);
+
+        if let Err(error) = execute_tmux_script_result(&state, add_pane_args).await {
             let message = workflow_error_to_string(error);
             set_smoke_run_failed(&state, &run_id, "spawning_lanes", message).await;
             let mut active = state.active_smoke_sessions.lock().await;
@@ -1540,7 +1621,7 @@ async fn run_smoke_workflow(
         let report_id = sanitize_report_id(
             report_id_override
                 .as_deref()
-                .unwrap_or(&format!("smoke-{run_id}")),
+                .unwrap_or(&format!("agent-{run_id}")),
         );
         build_benchmark_response_from_events(&state.event_store, report_id, &scoped_events)
     })();
@@ -1569,6 +1650,11 @@ async fn post_smoke_run_handler(
         target,
         runner_timeout_sec,
         report_id,
+        runner_output_mode,
+        runner_task_count,
+        runner_task_prefix,
+        runner_reasoning_effort,
+        runner_codex_prompt,
     } = request;
 
     let session = validate_tmux_session(session)?;
@@ -1585,7 +1671,39 @@ async fn post_smoke_run_handler(
 
     let runner_timeout_sec = runner_timeout_sec.unwrap_or(DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC);
     validate_runner_timeout(runner_timeout_sec)?;
-    enforce_codex_auth_for_lane_spawn(&state, "smoke-run").await?;
+
+    let runner_output_mode = runner_output_mode
+        .map(|mode| {
+            let trimmed = mode.trim().to_string();
+            validate_runner_output_mode(&trimmed)?;
+            Ok(trimmed)
+        })
+        .transpose()?;
+    if let Some(task_count) = runner_task_count {
+        validate_runner_task_count(task_count)?;
+    }
+    let runner_task_prefix = runner_task_prefix
+        .map(|prefix| {
+            let trimmed = prefix.trim().to_string();
+            validate_tmux_token("runner_task_prefix", &trimmed)?;
+            Ok(trimmed)
+        })
+        .transpose()?;
+    let runner_reasoning_effort = runner_reasoning_effort
+        .map(|value| {
+            let trimmed = value.trim().to_string();
+            validate_tmux_token("runner_reasoning_effort", &trimmed)?;
+            Ok(trimmed)
+        })
+        .transpose()?;
+    let runner_codex_prompt = runner_codex_prompt
+        .map(|value| {
+            validate_runner_codex_prompt(&value)?;
+            Ok(value)
+        })
+        .transpose()?;
+
+    enforce_codex_auth_for_lane_spawn(&state, "agent-run").await?;
 
     execute_tmux_script_result(
         &state,
@@ -1611,7 +1729,7 @@ async fn post_smoke_run_handler(
         let mut active = state.active_smoke_sessions.lock().await;
         if active.contains(&session) {
             return Err(conflict_error(format!(
-                "smoke run already active for session {session}"
+                "agent run already active for session {session}"
             )));
         }
         active.insert(session.clone());
@@ -1639,6 +1757,11 @@ async fn post_smoke_run_handler(
         profiles: profiles.clone(),
         lane_names: lane_names.clone(),
         runner_timeout_sec,
+        runner_output_mode: runner_output_mode.clone(),
+        runner_task_count,
+        runner_task_prefix: runner_task_prefix.clone(),
+        runner_reasoning_effort: runner_reasoning_effort.clone(),
+        runner_codex_prompt: runner_codex_prompt.clone(),
         current_step: "queued".to_string(),
         error: None,
         benchmark: None,
@@ -1659,7 +1782,7 @@ async fn post_smoke_run_handler(
         let mut active = state.active_smoke_sessions.lock().await;
         active.remove(&session);
         return Err(conflict_error(format!(
-            "smoke run history limit reached ({}); increase TRACE_SMOKE_RUN_HISTORY_LIMIT or wait for active runs to complete",
+            "agent run history limit reached ({}); increase TRACE_SMOKE_RUN_HISTORY_LIMIT or wait for active runs to complete",
             state.smoke_run_history_limit
         )));
     }
@@ -1674,6 +1797,11 @@ async fn post_smoke_run_handler(
             profiles,
             lane_names,
             runner_timeout_sec,
+            runner_output_mode,
+            runner_task_count,
+            runner_task_prefix,
+            runner_reasoning_effort,
+            runner_codex_prompt,
             report_id,
             start_global_seq,
         )
@@ -1694,12 +1822,26 @@ async fn get_smoke_run_handler(
             (
                 StatusCode::NOT_FOUND,
                 Json(ApiErrorResponse {
-                    error: format!("smoke run not found: {run_id}"),
+                    error: format!("agent run not found: {run_id}"),
                 }),
             )
         })?
         .clone();
     Ok(Json(smoke_run_response(&record)))
+}
+
+async fn post_agent_run_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<SmokeRunStartRequest>,
+) -> Result<(StatusCode, Json<SmokeRunResponse>), (StatusCode, Json<ApiErrorResponse>)> {
+    post_smoke_run_handler(State(state), Json(request)).await
+}
+
+async fn get_agent_run_handler(
+    State(state): State<ApiState>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Result<Json<SmokeRunResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    get_smoke_run_handler(State(state), AxumPath(run_id)).await
 }
 
 async fn post_tmux_start_handler(
@@ -3128,7 +3270,7 @@ mod tests {
                 .clone()
                 .oneshot(
                     Request::builder()
-                        .uri(format!("/smoke/runs/{run_id}"))
+                        .uri(format!("/agent/runs/{run_id}"))
                         .method("GET")
                         .body(Body::empty())
                         .expect("request should build"),
@@ -3425,7 +3567,7 @@ mod tests {
         assert!(terminal["report_id"]
             .as_str()
             .unwrap_or_default()
-            .starts_with("smoke-"));
+            .starts_with("agent-"));
 
         let json_report_path = terminal["json_report_path"]
             .as_str()
@@ -3439,12 +3581,75 @@ mod tests {
         let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
         assert!(logged_args.contains("status"));
         assert!(logged_args.contains("validate-target trace-web-test:lanes"));
-        assert!(logged_args.contains("add-pane smoke-flash-"));
-        assert!(logged_args.contains("add-pane smoke-high-"));
-        assert!(logged_args.contains("add-pane smoke-extra-"));
-        assert!(logged_args.contains("wait-lane smoke-flash-"));
-        assert!(logged_args.contains("wait-lane smoke-high-"));
-        assert!(logged_args.contains("wait-lane smoke-extra-"));
+        assert!(logged_args.contains("add-pane agent-flash-"));
+        assert!(logged_args.contains("add-pane agent-high-"));
+        assert!(logged_args.contains("add-pane agent-extra-"));
+        assert!(logged_args.contains("wait-lane agent-flash-"));
+        assert!(logged_args.contains("wait-lane agent-high-"));
+        assert!(logged_args.contains("wait-lane agent-extra-"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_smoke_run_workflow_passes_runner_options_to_tmux_script() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("tmux_args.log");
+        let tmux_script_path = root.join("tmux-ok.sh");
+        write_executable_script(
+            &tmux_script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"ok\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_tmux_script(&root, &store, tmux_script_path);
+
+        let start_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/runs")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "session": "trace-web-test",
+                            "profiles": ["flash"],
+                            "runner_output_mode": "scripted",
+                            "runner_task_count": 2,
+                            "runner_task_prefix": "TASK-HUMAN",
+                            "runner_reasoning_effort": "low",
+                            "runner_codex_prompt": "HumanPrompt"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(start_response.status(), axum::http::StatusCode::ACCEPTED);
+        let start_body = to_bytes(start_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let start_payload: Value =
+            serde_json::from_slice(&start_body).expect("response should parse");
+        let run_id = start_payload["run_id"]
+            .as_str()
+            .expect("run_id should be present")
+            .to_string();
+
+        let terminal = wait_for_smoke_run_terminal(&app, &run_id, Duration::from_secs(5)).await;
+        assert_eq!(terminal["status"].as_str(), Some("succeeded"));
+
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("--runner-output-mode scripted"));
+        assert!(logged_args.contains("--runner-task-count 2"));
+        assert!(logged_args.contains("--runner-task-prefix TASK-HUMAN"));
+        assert!(logged_args.contains("--runner-reasoning-effort low"));
+        assert!(logged_args.contains("--runner-codex-prompt HumanPrompt"));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -3767,7 +3972,7 @@ mod tests {
         assert!(second_payload["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("smoke run already active"));
+            .contains("agent run already active"));
 
         let terminal = wait_for_smoke_run_terminal(&app, &run_id, Duration::from_secs(5)).await;
         assert!(
@@ -3803,7 +4008,7 @@ mod tests {
         assert!(parsed["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("smoke run not found"));
+            .contains("agent run not found"));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

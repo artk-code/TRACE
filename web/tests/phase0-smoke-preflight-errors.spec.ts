@@ -38,10 +38,10 @@ async function installBaselineRoutes(page: Page): Promise<void> {
   });
 }
 
-test("phase0 smoke preflight: invalid target error is surfaced", async ({ page }) => {
+test("phase0 agent preflight: invalid target error is surfaced", async ({ page }) => {
   await installBaselineRoutes(page);
 
-  await page.route("**/smoke/runs", async (route) => {
+  await page.route("**/agent/runs", async (route) => {
     if (route.request().method() !== "POST") {
       return route.fallback();
     }
@@ -50,17 +50,17 @@ test("phase0 smoke preflight: invalid target error is surfaced", async ({ page }
 
   await page.goto("/");
 
-  const smokeSection = page.locator("section", { hasText: "Smoke Workflow" }).first();
-  await smokeSection.getByLabel("Target:").fill("trace-smoke:missing");
-  await smokeSection.getByRole("button", { name: "Run Smoke" }).click();
+  const agentSection = page.locator("section", { hasText: "Agent Runs" }).first();
+  await agentSection.getByLabel("Target:").fill("trace-smoke:missing");
+  await agentSection.getByRole("button", { name: "Run Agents" }).click();
 
-  await expect(smokeSection.getByText(/Smoke workflow failed: .*validate-target/)).toBeVisible();
+  await expect(agentSection.getByText(/Agent run failed: .*validate-target/)).toBeVisible();
 });
 
-test("phase0 smoke preflight: missing session error is surfaced", async ({ page }) => {
+test("phase0 agent preflight: missing session error is surfaced", async ({ page }) => {
   await installBaselineRoutes(page);
 
-  await page.route("**/smoke/runs", async (route) => {
+  await page.route("**/agent/runs", async (route) => {
     if (route.request().method() !== "POST") {
       return route.fallback();
     }
@@ -69,9 +69,9 @@ test("phase0 smoke preflight: missing session error is surfaced", async ({ page 
 
   await page.goto("/");
 
-  const smokeSection = page.locator("section", { hasText: "Smoke Workflow" }).first();
-  await smokeSection.getByLabel("Session:").fill("trace-smoke-missing");
-  await smokeSection.getByRole("button", { name: "Run Smoke" }).click();
+  const agentSection = page.locator("section", { hasText: "Agent Runs" }).first();
+  await agentSection.getByLabel("Session:").fill("trace-smoke-missing");
+  await agentSection.getByRole("button", { name: "Run Agents" }).click();
 
-  await expect(smokeSection.getByText(/Smoke workflow failed: .*status preflight/)).toBeVisible();
+  await expect(agentSection.getByText(/Agent run failed: .*status preflight/)).toBeVisible();
 });
