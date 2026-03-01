@@ -7,4 +7,6 @@
 /web/test-results
 /.trace
 /.trace-smoke
+/.workspaces
+/.jj
 .DS_Store

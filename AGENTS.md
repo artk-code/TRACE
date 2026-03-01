@@ -15,6 +15,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - `docs/PHASE0_SIGNOFF.md`
 - `docs/PHASE0_HUMAN_QA.md`
 - `docs/SETUP.md`
+- `docs/JJ_MULTIAGENT_WORKFLOW.md`
 
 ## Current Baseline
 - Canonical log + projection pipeline is active.
@@ -62,6 +63,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Web UI can trigger agent workflow runs and poll run status from browser controls.
 - Web UI can fetch/render latest benchmark report summaries from `/reports` APIs.
 - Browser E2E smoke harness exists (Playwright) and CI runs `pnpm --dir web test:e2e`.
+- `jj` repo bootstrap is available for multi-agent patch lanes (`jj git init` + `scripts/trace-jj.sh`).
 
 ## Smoketest Readiness (2026-03-01)
 - Shared-server ingest safety (lock + lease fencing): **82%**
@@ -100,6 +102,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No seeded deterministic task/eval pack with expected-output contract.
 - CLI remains read-oriented (`tasks`, `task`) and not smoke-run capable.
 - No merge/PR pipeline from winning or stacked candidates.
+- jj-based multi-agent patch flow is bootstrap-level only (lane workspaces + patch/publish); automated winner selection/stacked merge is still pending.
 
 ## Active Priorities
 1. Phase 0 human QA sign-off.
@@ -110,6 +113,9 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - Make benchmark quality signals reproducible across reruns.
 3. Merge/PR pipeline (after smoke stability).
   - Add winning/stacked candidate export and Git-compatible PR path.
+4. JJ patch workflow hardening.
+  - Add policy for lane bookmark naming and integration gates.
+  - Add scripted stacked-merge/winner selection on top of deterministic eval.
 
 ## Immediate Build Sequence
 1. Complete manual Phase 0 QA run and write sign-off record.

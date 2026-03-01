@@ -15,6 +15,7 @@ TRACE is a *local-first* harness that binds agent work to tasks, records immutab
 - [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)
 - [docs/PHASE0_HUMAN_QA.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_HUMAN_QA.md)
 - [docs/SETUP.md](/Users/artk/Documents/GitHub/TRACE/docs/SETUP.md)
+- [docs/JJ_MULTIAGENT_WORKFLOW.md](/Users/artk/Documents/GitHub/TRACE/docs/JJ_MULTIAGENT_WORKFLOW.md)
 
 ## Archived Planning Docs
 - [archive/phase0_docs](/Users/artk/Documents/GitHub/TRACE/archive/phase0_docs)
@@ -52,6 +53,28 @@ pnpm install
 ```
 Detailed Ubuntu operator/runbook flow is documented in:
 - [docs/SETUP.md](/Users/artk/Documents/GitHub/TRACE/docs/SETUP.md)
+
+## JJ Multi-Agent Patch Bootstrap
+One-time setup:
+```bash
+brew install jj  # macOS
+# or: cargo install --locked jj-cli  # Linux
+scripts/trace-jj.sh bootstrap
+jj config set --user user.name "Your Name"
+jj config set --user user.email "you@example.com"
+```
+
+Common lane flow:
+```bash
+scripts/trace-jj.sh lane-add codex-a
+cd .workspaces/codex-a
+jj commit -m "agent(codex-a): implement slice"
+scripts/trace-jj.sh patch /tmp/codex-a.patch @-
+scripts/trace-jj.sh publish agent/codex-a/slice @- origin
+```
+
+Full workflow guide:
+- [docs/JJ_MULTIAGENT_WORKFLOW.md](/Users/artk/Documents/GitHub/TRACE/docs/JJ_MULTIAGENT_WORKFLOW.md)
 
 ## Build + Test
 1. Rust formatting gate:
@@ -431,6 +454,8 @@ Note:
   - `POST /orchestrator/tmux/capture`
 - tmux pane input API is implemented:
   - `POST /orchestrator/tmux/send-keys`
+- jj multi-agent patch helper is implemented:
+  - `scripts/trace-jj.sh` (`bootstrap`, `lane-add`, `lane-list`, `patch`, `publish`)
 - Smoke workflow API is implemented:
   - `POST /agent/runs` (legacy alias: `/smoke/runs`)
   - `GET /agent/runs/{run_id}` (legacy alias: `/smoke/runs/{run_id}`)

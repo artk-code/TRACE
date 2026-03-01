@@ -47,7 +47,40 @@ cd /path/to/TRACE
 pnpm install
 ```
 
-## 6. Playwright Runtime (Linux)
+## 6. JJ Bootstrap (Multi-Agent Patch Lanes)
+Install `jj`:
+
+```bash
+# Option A (recommended on Ubuntu if cargo is installed)
+cargo install --locked jj-cli
+
+# Option B (if distro package is available)
+# sudo apt-get install -y jj
+```
+
+Initialize TRACE repo for jj usage:
+
+```bash
+scripts/trace-jj.sh bootstrap
+```
+
+Set jj commit identity:
+
+```bash
+jj config set --user user.name "Your Name"
+jj config set --user user.email "you@example.com"
+```
+
+Create first lane workspace:
+
+```bash
+scripts/trace-jj.sh lane-add codex-a
+```
+
+Detailed flow:
+- [docs/JJ_MULTIAGENT_WORKFLOW.md](/Users/artk/Documents/GitHub/TRACE/docs/JJ_MULTIAGENT_WORKFLOW.md)
+
+## 7. Playwright Runtime (Linux)
 Required before running browser E2E locally. `--with-deps` installs browser runtime dependencies on Ubuntu.
 ```bash
 pnpm --dir web exec playwright install --with-deps chromium
@@ -58,7 +91,7 @@ Headless-only hosts can run:
 xvfb-run -a pnpm --dir web test:e2e
 ```
 
-## 7. Full Regression Matrix
+## 8. Full Regression Matrix
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -68,7 +101,7 @@ pnpm --dir web build
 pnpm --dir web test:e2e
 ```
 
-## 8. Local Operator Flow (Ubuntu)
+## 9. Local Operator Flow (Ubuntu)
 
 1. Start TRACE server:
 ```bash
@@ -124,7 +157,7 @@ done
 scripts/trace-smoke-tmux.sh --session trace-smoke stop
 ```
 
-## 9. Common Issues
+## 10. Common Issues
 - `pnpm: command not found`:
   - run `corepack enable`, then restart shell.
 - Playwright browser/runtime missing:
@@ -135,6 +168,11 @@ scripts/trace-smoke-tmux.sh --session trace-smoke stop
 - `send-keys` rejected with `400`:
   - provide at least one of `text`, `key`, or `press_enter=true`.
   - allowed keys: `Enter`, `Tab`, `BSpace`, `Escape`, `Up`, `Down`, `Left`, `Right`, `C-c`, `C-z`, `C-l`, `C-u`.
+- `jj: command not found`:
+  - install with `cargo install --locked jj-cli`.
+  - reopen shell so `$HOME/.cargo/bin` is on `PATH`.
+- `jj` says no repo:
+  - run `scripts/trace-jj.sh bootstrap` from repo root.
 - Codex auth failures:
   - `codex login`
   - `curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .`
