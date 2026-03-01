@@ -53,6 +53,8 @@ const DEFAULT_TMUX_SCRIPT_PATH: &str = "scripts/trace-smoke-tmux.sh";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC: u64 = 180;
 const DEFAULT_SMOKE_RUN_HISTORY_LIMIT: usize = 200;
+const DEFAULT_REPORT_LIST_LIMIT: usize = 50;
+const MAX_REPORT_LIST_LIMIT: usize = 200;
 const DEFAULT_SMOKE_PROFILES: [&str; 3] = ["flash", "high", "extra"];
 static SMOKE_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -648,6 +650,12 @@ struct SmokeRunStartRequest {
     report_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ReportListQuery {
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 struct TmuxCommandResponse {
     command: String,
@@ -723,6 +731,21 @@ struct SmokeRunResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct ReportListResponse {
+    reports: Vec<ReportListItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReportListItem {
+    report_id: String,
+    generated_at: String,
+    total_events: usize,
+    total_tasks: usize,
+    total_runs: usize,
+    models: Vec<BenchmarkModelSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct BenchmarkReport {
     report_id: String,
     generated_at: String,
@@ -733,7 +756,7 @@ struct BenchmarkReport {
     runs: Vec<BenchmarkRunSummary>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct BenchmarkRunSummary {
     run_id: String,
     task_id: String,
@@ -754,7 +777,7 @@ struct BenchmarkRunSummary {
     passed: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct BenchmarkModelSummary {
     model_key: String,
     model: Option<String>,
@@ -851,6 +874,8 @@ fn app_router_with_tmux_script(
             "/orchestrator/auth/codex/status",
             get(get_codex_auth_status_handler),
         )
+        .route("/reports", get(get_reports_handler))
+        .route("/reports/{report_id}", get(get_report_handler))
         .route("/smoke/runs", post(post_smoke_run_handler))
         .route("/smoke/runs/{run_id}", get(get_smoke_run_handler))
         .route("/orchestrator/tmux/start", post(post_tmux_start_handler))
@@ -1933,6 +1958,80 @@ async fn get_run_output_handler(
     Json(api.get_run_output(&run_id))
 }
 
+async fn get_reports_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ReportListQuery>,
+) -> Result<Json<ReportListResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let limit = resolve_report_list_limit(query.limit)?;
+    let reports_dir = trace_root_from_event_store(&state.event_store).join(".trace/reports");
+    let entries = match std::fs::read_dir(&reports_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Json(ReportListResponse {
+                reports: Vec::new(),
+            }));
+        }
+        Err(error) => return Err(internal_error(error.to_string())),
+    };
+
+    let mut reports = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+
+        let report = match read_benchmark_report_from_path(&path) {
+            Ok(report) => report,
+            Err(_) => continue,
+        };
+        reports.push(benchmark_report_to_list_item(report));
+    }
+
+    reports.sort_by(|left, right| {
+        match (
+            parse_rfc3339(&left.generated_at),
+            parse_rfc3339(&right.generated_at),
+        ) {
+            (Some(left_ts), Some(right_ts)) => right_ts
+                .cmp(&left_ts)
+                .then_with(|| right.report_id.cmp(&left.report_id)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => right.report_id.cmp(&left.report_id),
+        }
+    });
+    reports.truncate(limit);
+
+    Ok(Json(ReportListResponse { reports }))
+}
+
+async fn get_report_handler(
+    State(state): State<ApiState>,
+    AxumPath(report_id): AxumPath<String>,
+) -> Result<Json<BenchmarkReport>, (StatusCode, Json<ApiErrorResponse>)> {
+    let report_id = validate_report_id_for_read(&report_id)?;
+    let report_path = report_json_path(&state.event_store, &report_id);
+    match std::fs::metadata(&report_path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err(not_found_error(format!("report not found: {report_id}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(not_found_error(format!("report not found: {report_id}")));
+        }
+        Err(error) => return Err(internal_error(error.to_string())),
+    }
+
+    let report =
+        read_benchmark_report_from_path(&report_path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                not_found_error(format!("report not found: {report_id}"))
+            }
+            _ => internal_error(error.to_string()),
+        })?;
+
+    Ok(Json(report))
+}
+
 #[derive(Debug, Serialize)]
 struct ApiErrorResponse {
     error: String,
@@ -1941,6 +2040,15 @@ struct ApiErrorResponse {
 fn bad_request_error(message: impl Into<String>) -> (StatusCode, Json<ApiErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
+        Json(ApiErrorResponse {
+            error: message.into(),
+        }),
+    )
+}
+
+fn not_found_error(message: impl Into<String>) -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
         Json(ApiErrorResponse {
             error: message.into(),
         }),
@@ -2155,6 +2263,61 @@ fn sanitize_report_id(raw: &str) -> String {
         "benchmark".to_string()
     } else {
         sanitized
+    }
+}
+
+fn validate_report_id_for_read(
+    report_id: &str,
+) -> Result<String, (StatusCode, Json<ApiErrorResponse>)> {
+    if report_id.is_empty() {
+        return Err(bad_request_error("report_id cannot be empty"));
+    }
+
+    if !report_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(bad_request_error(
+            "report_id contains invalid characters; allowed: [A-Za-z0-9_-]",
+        ));
+    }
+
+    Ok(report_id.to_string())
+}
+
+fn resolve_report_list_limit(
+    requested_limit: Option<usize>,
+) -> Result<usize, (StatusCode, Json<ApiErrorResponse>)> {
+    let limit = requested_limit.unwrap_or(DEFAULT_REPORT_LIST_LIMIT);
+    if (1..=MAX_REPORT_LIST_LIMIT).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err(bad_request_error(format!(
+            "limit must be between 1 and {MAX_REPORT_LIST_LIMIT}"
+        )))
+    }
+}
+
+fn report_json_path(event_store: &EventStore, report_id: &str) -> PathBuf {
+    let root = trace_root_from_event_store(event_store);
+    root.join(".trace/reports")
+        .join(format!("{report_id}.json"))
+}
+
+fn read_benchmark_report_from_path(path: &Path) -> Result<BenchmarkReport, std::io::Error> {
+    let raw = std::fs::read_to_string(path)?;
+    serde_json::from_str::<BenchmarkReport>(&raw)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
+}
+
+fn benchmark_report_to_list_item(report: BenchmarkReport) -> ReportListItem {
+    ReportListItem {
+        report_id: report.report_id,
+        generated_at: report.generated_at,
+        total_events: report.total_events,
+        total_tasks: report.total_tasks,
+        total_runs: report.total_runs,
+        models: report.models,
     }
 }
 
@@ -2911,6 +3074,49 @@ mod tests {
         codex_script_path
     }
 
+    fn write_report_fixture(
+        root: &std::path::Path,
+        report_id: &str,
+        generated_at: &str,
+        total_runs: usize,
+    ) -> PathBuf {
+        let reports_dir = root.join(".trace/reports");
+        fs::create_dir_all(&reports_dir).expect("reports directory should be created");
+        let report_path = reports_dir.join(format!("{report_id}.json"));
+
+        let payload = json!({
+            "report_id": report_id,
+            "generated_at": generated_at,
+            "total_events": 12,
+            "total_tasks": 2,
+            "total_runs": total_runs,
+            "models": [
+                {
+                    "model_key": "openai:gpt-5-flash:flash",
+                    "model": "gpt-5-flash",
+                    "provider": "openai",
+                    "profile": "flash",
+                    "runs": total_runs,
+                    "pass_count": total_runs,
+                    "fail_count": 0,
+                    "candidate_total": total_runs,
+                    "candidate_eligible": total_runs,
+                    "candidate_disqualified": 0,
+                    "output_bytes": 128,
+                    "avg_duration_ms": 42.0
+                }
+            ],
+            "runs": []
+        });
+
+        fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&payload).expect("fixture report should serialize"),
+        )
+        .expect("fixture report should be written");
+        report_path
+    }
+
     async fn wait_for_smoke_run_terminal(
         app: &axum::Router,
         run_id: &str,
@@ -3598,6 +3804,175 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("smoke run not found"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_reports_returns_empty_when_reports_directory_missing() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(
+            parsed["reports"].as_array().map(|items| items.len()),
+            Some(0)
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_reports_lists_only_json_and_sorts_latest_first() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        write_report_fixture(&root, "report_old", "2026-02-28T04:00:00Z", 1);
+        write_report_fixture(&root, "report_new", "2026-02-28T05:00:00Z", 2);
+        fs::write(root.join(".trace/reports/report_new.md"), "# markdown").expect("md write");
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports?limit=10")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        let reports = parsed["reports"]
+            .as_array()
+            .expect("reports list should be an array");
+
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0]["report_id"].as_str(), Some("report_new"));
+        assert_eq!(reports[1]["report_id"].as_str(), Some("report_old"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_report_rejects_invalid_report_id() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports/bad.id")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_report_rejects_path_traversal_tokens() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports/..")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_report_returns_not_found_for_missing_report() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports/missing_report")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("report not found"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_report_returns_json_payload_for_existing_report() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        write_report_fixture(&root, "report_ok", "2026-02-28T06:00:00Z", 3);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports/report_ok")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["report_id"].as_str(), Some("report_ok"));
+        assert_eq!(parsed["total_runs"].as_u64(), Some(3));
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

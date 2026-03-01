@@ -84,7 +84,7 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
    - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
 
-## Web UI Status (2026-02-28)
+## Web UI Status (2026-03-01)
 - Current UI supports:
   - Codex auth preflight check.
   - tmux orchestration controls (`start`, `status`, `add-lane`, `add-pane`, `stop`).
@@ -92,7 +92,7 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
 - Not yet implemented in UI:
   - `Run Smoke` action (`POST /smoke/runs`).
   - Smoke-run status polling (`GET /smoke/runs/{run_id}`).
-  - Report retrieval and rendering (`GET /reports`, `GET /reports/{report_id}`).
+  - Report retrieval/rendering flow in the UI (`View Latest Report`).
 
 ## Codex Auth Policy + Preflight
 TRACE exposes a Codex auth status endpoint and enforces auth at lane-spawn time.
@@ -209,6 +209,28 @@ Smoke run states:
   - `evaluating_benchmark`
   - `completed`
 
+## Report Retrieval API Contract
+`GET /reports`
+
+Query:
+- `limit` optional integer in `[1, 200]`, default `50`.
+
+Behavior:
+- Reads reports from `.trace/reports/*.json`.
+- Ignores non-JSON files (for example `.md` artifacts).
+- Returns latest-first ordering by `generated_at` (RFC3339 parse, then `report_id` tie-breaker).
+
+Success response:
+- HTTP `200 OK`.
+- Returns `{ "reports": [ ... ] }` with each item including:
+  - `report_id`, `generated_at`, `total_events`, `total_tasks`, `total_runs`, `models`.
+
+`GET /reports/{report_id}`
+- `report_id` must match `[A-Za-z0-9_-]+` (strict identifier token, not a path).
+- Returns full benchmark report JSON payload for that `report_id`.
+- Missing report returns HTTP `404`.
+- Invalid `report_id` format returns HTTP `400`.
+
 ## API Smoke (No Browser)
 ```bash
 curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .
@@ -237,14 +259,16 @@ done
 
 cat /tmp/trace-smoke-run.json | jq .
 
+curl -sS http://127.0.0.1:18086/reports?limit=1 | jq .
+
 curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/stop \
   -H 'content-type: application/json' \
   -d '{"session":"trace-web-smoke"}'
 ```
 
 Note:
-- `/reports` APIs are not implemented yet.
-- Use `json_report_path` / `markdown_report_path` from smoke-run terminal response for now.
+- `/reports` APIs are implemented and are the supported browser retrieval path.
+- `json_report_path` / `markdown_report_path` are still returned by smoke status for operator debugging.
 
 ## Troubleshooting
 - `412 Precondition Failed` on `add-lane`/`add-pane`:
@@ -267,14 +291,14 @@ Note:
 - Smoke workflow API is implemented:
   - `POST /smoke/runs`
   - `GET /smoke/runs/{run_id}`
-- Next milestone is report retrieval APIs plus web smoke trigger/poll/report UI wiring.
+- Report retrieval APIs are implemented:
+  - `GET /reports`
+  - `GET /reports/{report_id}`
+- Next milestone is web smoke trigger/poll/report UI wiring.
 
 ## Immediate Blocker-Removal Plan
-1. Add report retrieval API:
-   - `GET /reports`
-   - `GET /reports/{report_id}`
-2. Wire minimal web smoke flow:
+1. Wire minimal web smoke flow:
    - `Run Smoke`, `Refresh Status`, `View Latest Report`
-3. Add deterministic seeded eval pack so scores are stable.
-4. Add one Playwright smoke test and gate CI on it.
-5. Add merge/PR output pipeline after smoke stability.
+2. Add deterministic seeded eval pack so scores are stable.
+3. Add one Playwright smoke test and gate CI on it.
+4. Add merge/PR output pipeline after smoke stability.

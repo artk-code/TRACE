@@ -1,6 +1,6 @@
 # TRACE Agent Specification (Current)
 
-Date: 2026-02-28  
+Date: 2026-03-01  
 Status: Active
 
 ## Objective
@@ -26,6 +26,11 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Benchmark endpoint exists:
   - `POST /benchmarks/evaluate`
   - Writes `.trace/reports/<report_id>.json` + `.md`
+- Report retrieval endpoints exist:
+  - `GET /reports`
+  - `GET /reports/{report_id}`
+  - list reads `.trace/reports/*.json` (latest-first, `limit` default `50`, max `200`)
+  - get enforces strict `report_id` token validation (`[A-Za-z0-9_-]+`)
 - Browser transport contract exists via CORS (dev origins + preflight coverage).
 - Codex auth preflight endpoint exists:
   - `GET /orchestrator/auth/codex/status`
@@ -56,6 +61,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - tmux orchestration routes are active and validated for basic inputs.
 - tmux add-lane/add-pane are auth-gated server-side when `TRACE_CODEX_AUTH_POLICY=required`.
 - Smoke workflow API coordinates multi-lane runner launch, wait, and benchmark writeback.
+- Report retrieval APIs expose benchmark JSON over HTTP for browser consumption.
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop and auth preflight status.
 - Lane shells support two execution modes:
   - `interactive` (manual copy/paste flow)
@@ -64,7 +70,6 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 
 ## Known Gaps Blocking "Super Smoketest"
 - Browser UI does not yet drive `POST /smoke/runs` / `GET /smoke/runs/{run_id}`.
-- No report list/get API for browser retrieval; reports are filesystem artifacts only.
 - Smoke workflow currently requires an existing tmux session and valid target (`session` + `target` preflight).
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
 - No seeded deterministic task/eval pack with expected-output contract.
@@ -73,27 +78,23 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Report retrieval APIs.
-  - Add `GET /reports` and `GET /reports/{report_id}` rooted under `.trace/reports`.
-  - Keep report ID sanitization/root scoping safeguards.
-2. Minimal web smoke flow.
+1. Minimal web smoke flow.
   - Add `Run Smoke`, `Refresh Status`, `View Latest Report` UI flow.
   - Poll smoke run status and render summary from report APIs.
-3. Deterministic eval contract.
+2. Deterministic eval contract.
   - Add seeded task pack + expected-output scoring contract.
   - Make benchmark quality signals reproducible across reruns.
-4. Browser E2E + CI gate.
+3. Browser E2E + CI gate.
   - Add Playwright smoke covering auth check, smoke run, report visibility.
   - Gate CI on this test.
-5. Merge/PR pipeline (after smoke stability).
+4. Merge/PR pipeline (after smoke stability).
   - Add winning/stacked candidate export and Git-compatible PR path.
 
 ## Immediate Build Sequence
-1. Implement `GET /reports` + `GET /reports/{report_id}`.
-2. Wire web controls for run/poll/view report.
-3. Add deterministic seeded eval pack.
-4. Add one stable Playwright smoke and CI gate.
-5. Add merge/PR workflow after smoke is reliable.
+1. Wire web controls for run/poll/view report.
+2. Add deterministic seeded eval pack.
+3. Add one stable Playwright smoke and CI gate.
+4. Add merge/PR workflow after smoke is reliable.
 
 ## Tmux Orchestration Runbook (Now)
 Prerequisite:
@@ -176,6 +177,12 @@ Prerequisite:
 - `test_smoke_run_rejects_when_tmux_target_preflight_fails`
 - `test_smoke_run_benchmark_scopes_out_unrelated_events_after_start`
 - `test_smoke_run_history_limit_prunes_old_terminal_runs`
+- `test_get_reports_returns_empty_when_reports_directory_missing`
+- `test_get_reports_lists_only_json_and_sorts_latest_first`
+- `test_get_report_rejects_invalid_report_id`
+- `test_get_report_rejects_path_traversal_tokens`
+- `test_get_report_returns_not_found_for_missing_report`
+- `test_get_report_returns_json_payload_for_existing_report`
 - `web/src/guards.test.ts` runtime schema guard coverage
 
 ## Exit Criteria
