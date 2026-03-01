@@ -11,6 +11,11 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - `SMOKETEST_EVAL_PLAN_v2.md`
 - `FRONTEND_PLAN_v5.md`
 
+## Phase 0 QA Docs
+- `docs/PHASE0_SIGNOFF.md`
+- `docs/PHASE0_HUMAN_QA.md`
+- `docs/LINUX_BUILD_HUMAN.md`
+
 ## Current Baseline
 - Canonical log + projection pipeline is active.
 - Write APIs exist on both generic and typed paths:
@@ -74,7 +79,11 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - `runner` (scripted claim/run/output/candidate/verdict/release flow)
 - Benchmark report generation writes JSON+Markdown artifacts with sanitized report IDs.
 
-## Known Gaps Blocking "Super Smoketest"
+## Known Gaps Blocking Final Phase 0 Sign-Off
+- Human QA evidence for a real tmux-backed browser smoke run is not yet recorded in `docs/PHASE0_SIGNOFF.md`.
+- Automated Playwright E2E is API-stubbed by design for CI stability; live-environment validation is still a manual gate (`docs/PHASE0_HUMAN_QA.md`).
+
+## Post-Phase0 Gaps
 - Smoke workflow currently requires an existing tmux session and valid target (`session` + `target` preflight).
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
 - No seeded deterministic task/eval pack with expected-output contract.
@@ -82,15 +91,19 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Deterministic eval contract.
+1. Phase 0 human QA sign-off.
+  - Run the manual browser/tmux smoke validation checklist.
+  - Record run evidence and verdict in `docs/PHASE0_SIGNOFF.md`.
+2. Deterministic eval contract.
   - Add seeded task pack + expected-output scoring contract.
   - Make benchmark quality signals reproducible across reruns.
-2. Merge/PR pipeline (after smoke stability).
+3. Merge/PR pipeline (after smoke stability).
   - Add winning/stacked candidate export and Git-compatible PR path.
 
 ## Immediate Build Sequence
-1. Add deterministic seeded eval pack.
-2. Add merge/PR workflow after smoke is reliable.
+1. Complete manual Phase 0 QA run and write sign-off record.
+2. Add deterministic seeded eval pack.
+3. Add merge/PR workflow after smoke is reliable.
 
 ## Tmux Orchestration Runbook (Now)
 Prerequisite:

@@ -43,6 +43,7 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
   - CI runs `pnpm --dir web test:e2e`
 
 ## Confirmed Gaps
+- Human QA sign-off artifacts for a real shared-server run are not yet recorded.
 - No deterministic task pack + expected scoring contract.
 
 ## Milestones
@@ -50,9 +51,14 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
 2. M3: Minimal web flow. (Completed)
 3. M4: Deterministic evaluator seed pack. (Pending)
 4. M5: Playwright smoke tests + CI gate. (Completed)
+5. M6: Human QA sign-off record with real tmux/session run evidence. (Pending)
 
 ## Acceptance Criteria
 - At least 3 lanes can run a web-triggered smoke flow against one server/root.
 - No missing or duplicate `global_seq` entries under concurrent lane writes.
 - Stale lease writes are rejected/disqualified with explicit reason.
 - UI can display benchmark report results without direct filesystem access.
+
+## Human QA Evidence
+- Manual execution checklist lives in `docs/PHASE0_HUMAN_QA.md`.
+- Final sign-off record lives in `docs/PHASE0_SIGNOFF.md`.

@@ -39,10 +39,13 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
    - `.github/workflows/ci.yml` runs `pnpm test:e2e`
 
 ## Execution Sequence
-1. Deterministic eval contract.
+1. Phase 0 human QA sign-off.
+   - Execute the manual browser/tmux validation flow in `docs/PHASE0_HUMAN_QA.md`.
+   - Record evidence in `docs/PHASE0_SIGNOFF.md`.
+2. Deterministic eval contract.
    - Add seeded task pack and expected-output checks.
    - Make benchmark quality outcome reproducible run-to-run.
-2. Merge/PR pipeline.
+3. Merge/PR pipeline.
    - Add winner/stacked-candidate export and Git-compatible PR workflow after smoke path stabilizes.
 
 ## Risks
@@ -57,7 +60,11 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
 - `rustup run stable cargo test --workspace`
 - `pnpm --dir web test`
 - `pnpm --dir web build`
-- `pnpm --dir web test:e2e` (enabled once Playwright smoke lands)
+- `pnpm --dir web test:e2e`
+
+## Human QA Gate
+- Run manual Phase 0 smoke verification with a real TRACE server + tmux target.
+- Capture run artifacts and verdict in `docs/PHASE0_SIGNOFF.md`.
 
 ## Exit Criteria
 - One web-driven action can run a 3-lane smoke scenario end-to-end.

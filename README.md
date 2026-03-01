@@ -7,6 +7,11 @@ TRACE is a *local-first* harness that binds agent work to tasks, records immutab
 - [SMOKETEST_EVAL_PLAN_v2.md](/Users/artk/Documents/GitHub/TRACE/SMOKETEST_EVAL_PLAN_v2.md)
 - [FRONTEND_PLAN_v5.md](/Users/artk/Documents/GitHub/TRACE/FRONTEND_PLAN_v5.md)
 
+## Phase 0 QA Docs
+- [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)
+- [docs/PHASE0_HUMAN_QA.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_HUMAN_QA.md)
+- [docs/LINUX_BUILD_HUMAN.md](/Users/artk/Documents/GitHub/TRACE/docs/LINUX_BUILD_HUMAN.md)
+
 ## Archived Planning Docs
 - [archive/phase0_docs](/Users/artk/Documents/GitHub/TRACE/archive/phase0_docs)
 - [archive/plan_refresh_2026-02-28/00_INDEX.md](/Users/artk/Documents/GitHub/TRACE/archive/plan_refresh_2026-02-28/00_INDEX.md)
@@ -60,7 +65,16 @@ rustup run stable cargo test --workspace
 pnpm --dir web test
 pnpm --dir web build
 ```
-5. Browser E2E:
+5. Install Playwright browser runtime:
+Linux:
+```bash
+pnpm --dir web exec playwright install --with-deps chromium
+```
+macOS:
+```bash
+pnpm --dir web exec playwright install chromium
+```
+6. Browser E2E:
 ```bash
 pnpm --dir web test:e2e
 ```
@@ -97,6 +111,7 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
   - Report retrieval/rendering flow (`View Latest Report`) with model summary table.
   - Read-only task/candidate/output views.
   - Playwright smoke baseline for auth -> smoke -> report flow.
+  - CI Playwright scenario is API-stubbed for stability; real tmux/server verification is tracked in `docs/PHASE0_HUMAN_QA.md`.
 
 ## Codex Auth Policy + Preflight
 TRACE exposes a Codex auth status endpoint and enforces auth at lane-spawn time.
@@ -300,8 +315,14 @@ Note:
   - `GET /reports/{report_id}`
 - Web UI now supports smoke run trigger/poll and latest report retrieval/rendering.
 - Playwright E2E smoke is implemented and CI-gated.
+- Phase 0 sign-off artifacts are tracked under:
+  - [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)
+  - [docs/PHASE0_HUMAN_QA.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_HUMAN_QA.md)
 - Next milestone is deterministic seeded eval/scoring contract.
 
 ## Immediate Blocker-Removal Plan
-1. Add deterministic seeded eval pack so scores are stable.
-2. Add merge/PR output pipeline after smoke stability.
+1. Execute and record human QA sign-off run using:
+   - [docs/PHASE0_HUMAN_QA.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_HUMAN_QA.md)
+   - [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)
+2. Add deterministic seeded eval pack so scores are stable.
+3. Add merge/PR output pipeline after smoke stability.

@@ -41,9 +41,10 @@ Move from read-focused UI to browser-driven smoke orchestration and benchmark re
   - auth preflight status and error/remediation rendering
   - smoke run trigger + polling state transitions
   - report table rendering with fixture payloads
-- E2E (`playwright`, to add):
+- E2E (`playwright`):
   - open app, verify auth gate behavior, run smoke workflow, assert report UI
   - status: baseline landed in `web/tests/phase0-smoke.spec.ts`
+  - note: CI baseline is API-stubbed; real server/tmux verification is tracked in `docs/PHASE0_HUMAN_QA.md`
 
 ## Definition Of Done
 - Browser can drive smoke run and view benchmark summary end-to-end.
