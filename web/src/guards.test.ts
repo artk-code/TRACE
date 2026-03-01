@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   decodeOutputChunk,
+  parseBenchmarkReport,
   parseCodexAuthStatus,
+  parseReportListResponse,
   parseSmokeRunResponse,
   parseTaskResponse,
   parseTmuxCommandResponse,
@@ -173,5 +175,112 @@ describe("smoke_run_response_guard", () => {
     };
 
     expect(() => parseSmokeRunResponse(payload)).toThrow();
+  });
+});
+
+describe("report_list_response_guard", () => {
+  it("accepts reports list response shape", () => {
+    const payload = {
+      reports: [
+        {
+          report_id: "report-123",
+          generated_at: "2026-03-01T08:00:00Z",
+          total_events: 42,
+          total_tasks: 3,
+          total_runs: 9,
+          models: [
+            {
+              model_key: "openai:gpt-5:high",
+              model: "gpt-5",
+              provider: "openai",
+              profile: "high",
+              runs: 9,
+              pass_count: 7,
+              fail_count: 2,
+              candidate_total: 9,
+              candidate_eligible: 8,
+              candidate_disqualified: 1,
+              output_bytes: 2048,
+              avg_duration_ms: 3500,
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(parseReportListResponse(payload).reports[0]?.report_id).toBe("report-123");
+  });
+
+  it("rejects invalid reports list response shape", () => {
+    const payload = {
+      reports: {},
+    };
+
+    expect(() => parseReportListResponse(payload)).toThrow();
+  });
+});
+
+describe("benchmark_report_guard", () => {
+  it("accepts benchmark report response shape", () => {
+    const payload = {
+      report_id: "report-123",
+      generated_at: "2026-03-01T08:00:00Z",
+      total_events: 42,
+      total_tasks: 3,
+      total_runs: 9,
+      models: [
+        {
+          model_key: "openai:gpt-5:high",
+          model: "gpt-5",
+          provider: "openai",
+          profile: "high",
+          runs: 9,
+          pass_count: 7,
+          fail_count: 2,
+          candidate_total: 9,
+          candidate_eligible: 8,
+          candidate_disqualified: 1,
+          output_bytes: 2048,
+          avg_duration_ms: 3500,
+        },
+      ],
+      runs: [
+        {
+          run_id: "RUN-1",
+          task_id: "TASK-1",
+          model: "gpt-5",
+          provider: "openai",
+          profile: "high",
+          worker_id: "worker-1",
+          lease_epoch: 2,
+          started_at: "2026-03-01T07:59:00Z",
+          completed_at: "2026-03-01T08:00:00Z",
+          duration_ms: 60000,
+          candidate_total: 1,
+          candidate_eligible: 1,
+          candidate_disqualified: 0,
+          output_chunks: 4,
+          output_bytes: 512,
+          verdict: "pass",
+          passed: true,
+        },
+      ],
+    };
+
+    expect(parseBenchmarkReport(payload).runs[0]?.run_id).toBe("RUN-1");
+  });
+
+  it("rejects invalid benchmark report response shape", () => {
+    const payload = {
+      report_id: "report-123",
+      generated_at: "2026-03-01T08:00:00Z",
+      total_events: 42,
+      total_tasks: 3,
+      total_runs: "9",
+      models: [],
+      runs: [],
+    };
+
+    expect(() => parseBenchmarkReport(payload)).toThrow();
   });
 });

@@ -1,6 +1,6 @@
 # TRACE Build Sequence Plan v3
 
-Date: 2026-02-28  
+Date: 2026-03-01  
 Depends on: `AGENTS.md`
 
 ## Goal
@@ -27,22 +27,22 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
    - `POST /smoke/runs`
    - `GET /smoke/runs/{run_id}`
    - preflights tmux session/target, scopes events by smoke lanes, writes benchmark report at completion
+10. Report retrieval APIs are implemented:
+   - `GET /reports`
+   - `GET /reports/{report_id}`
+11. Web UI smoke/report flow is implemented:
+   - `Run Smoke`
+   - `Refresh Status`
+   - `View Latest Report`
 
 ## Execution Sequence
-1. Report retrieval APIs.
-   - Add `GET /reports` (latest-first report metadata).
-   - Add `GET /reports/{report_id}` (report payload for UI rendering).
-   - Keep report ID sanitization and root scoping safeguards.
-2. Minimal web smoke flow.
-   - Add `Run Smoke`, `Refresh Status`, `View Latest Report`.
-   - Poll `GET /smoke/runs/{run_id}` until terminal status.
-3. Deterministic eval contract.
-   - Add seeded task pack and expected-output checks.
-   - Make benchmark quality outcome reproducible run-to-run.
-4. Browser E2E harness + CI gate.
+1. Browser E2E harness + CI gate.
    - Add one Playwright smoke validating auth check -> run smoke -> report visible.
    - Gate CI on that test plus existing Rust/web regressions.
-5. Merge/PR pipeline.
+2. Deterministic eval contract.
+   - Add seeded task pack and expected-output checks.
+   - Make benchmark quality outcome reproducible run-to-run.
+3. Merge/PR pipeline.
    - Add winner/stacked-candidate export and Git-compatible PR workflow after smoke path stabilizes.
 
 ## Risks

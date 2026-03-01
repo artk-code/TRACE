@@ -1,16 +1,20 @@
 import type {
+  BenchmarkReport,
   CandidateSummary,
   CodexAuthStatus,
   OutputChunk,
+  ReportListResponse,
   SmokeRunResponse,
   TaskResponse,
   TimelineEvent,
   TmuxCommandResponse,
 } from "./contracts";
 import {
+  parseBenchmarkReport,
   parseCandidates,
   parseCodexAuthStatus,
   parseOutput,
+  parseReportListResponse,
   parseSmokeRunResponse,
   parseTaskList,
   parseTaskResponse,
@@ -175,4 +179,15 @@ export async function postSmokeRun(request: SmokeRunStartRequest): Promise<Smoke
 export async function fetchSmokeRun(runId: string): Promise<SmokeRunResponse> {
   const raw = await getJson(`/smoke/runs/${runId}`);
   return parseSmokeRunResponse(raw);
+}
+
+export async function fetchReports(limit?: number): Promise<ReportListResponse> {
+  const query = typeof limit === "number" ? `?limit=${encodeURIComponent(String(limit))}` : "";
+  const raw = await getJson(`/reports${query}`);
+  return parseReportListResponse(raw);
+}
+
+export async function fetchReport(reportId: string): Promise<BenchmarkReport> {
+  const raw = await getJson(`/reports/${encodeURIComponent(reportId)}`);
+  return parseBenchmarkReport(raw);
 }

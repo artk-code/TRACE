@@ -113,6 +113,57 @@ export const benchmarkSummarySchema = z
   })
   .strict();
 
+export const benchmarkRunSummarySchema = z
+  .object({
+    run_id: z.string(),
+    task_id: z.string(),
+    model: z.string().optional().nullable(),
+    provider: z.string().optional().nullable(),
+    profile: z.string().optional().nullable(),
+    worker_id: z.string().optional().nullable(),
+    lease_epoch: z.number().int().nonnegative().optional().nullable(),
+    started_at: z.string().optional().nullable(),
+    completed_at: z.string().optional().nullable(),
+    duration_ms: z.number().int().optional().nullable(),
+    candidate_total: z.number().int().nonnegative(),
+    candidate_eligible: z.number().int().nonnegative(),
+    candidate_disqualified: z.number().int().nonnegative(),
+    output_chunks: z.number().int().nonnegative(),
+    output_bytes: z.number().int().nonnegative(),
+    verdict: z.string().optional().nullable(),
+    passed: z.boolean().optional().nullable(),
+  })
+  .strict();
+
+export const benchmarkReportSchema = z
+  .object({
+    report_id: z.string(),
+    generated_at: z.string(),
+    total_events: z.number().int().nonnegative(),
+    total_tasks: z.number().int().nonnegative(),
+    total_runs: z.number().int().nonnegative(),
+    models: z.array(benchmarkModelSummarySchema),
+    runs: z.array(benchmarkRunSummarySchema),
+  })
+  .strict();
+
+export const reportListItemSchema = z
+  .object({
+    report_id: z.string(),
+    generated_at: z.string(),
+    total_events: z.number().int().nonnegative(),
+    total_tasks: z.number().int().nonnegative(),
+    total_runs: z.number().int().nonnegative(),
+    models: z.array(benchmarkModelSummarySchema),
+  })
+  .strict();
+
+export const reportListResponseSchema = z
+  .object({
+    reports: z.array(reportListItemSchema),
+  })
+  .strict();
+
 export const smokeRunStatusSchema = z.enum(["queued", "running", "succeeded", "failed"]);
 
 export const smokeRunResponseSchema = z
@@ -144,5 +195,9 @@ export type TmuxCommandResponse = z.infer<typeof tmuxCommandResponseSchema>;
 export type CodexAuthStatus = z.infer<typeof codexAuthStatusSchema>;
 export type BenchmarkModelSummary = z.infer<typeof benchmarkModelSummarySchema>;
 export type BenchmarkSummary = z.infer<typeof benchmarkSummarySchema>;
+export type BenchmarkRunSummary = z.infer<typeof benchmarkRunSummarySchema>;
+export type BenchmarkReport = z.infer<typeof benchmarkReportSchema>;
+export type ReportListItem = z.infer<typeof reportListItemSchema>;
+export type ReportListResponse = z.infer<typeof reportListResponseSchema>;
 export type SmokeRunStatus = z.infer<typeof smokeRunStatusSchema>;
 export type SmokeRunResponse = z.infer<typeof smokeRunResponseSchema>;

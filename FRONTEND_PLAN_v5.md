@@ -1,6 +1,6 @@
 # TRACE Frontend Plan v5
 
-Date: 2026-02-28  
+Date: 2026-03-01  
 Depends on: `AGENTS.md`, `SMOKETEST_EVAL_PLAN_v2.md`
 
 ## Goal
@@ -18,17 +18,20 @@ Move from read-focused UI to browser-driven smoke orchestration and benchmark re
 - Backend smoke workflow API is available for UI integration:
   - `POST /smoke/runs`
   - `GET /smoke/runs/{run_id}`
+- UI smoke workflow controls are implemented:
+  - `Run Smoke`
+  - `Refresh Status`
+  - active-run status polling
+- UI report flow is implemented:
+  - `View Latest Report` via `GET /reports` + `GET /reports/{report_id}`
+  - model summary table rendering from benchmark report payload
 
 ## Phase Sequence
-1. Phase A: Workflow trigger + status polling.
-   - Add `Run Smoke` action backed by `POST /smoke/runs`.
-   - Poll `GET /smoke/runs/{run_id}` and render state: idle/running/succeeded/failed.
-2. Phase B: Report fetch + summary.
-   - Add `View Latest Report` backed by `GET /reports` + `GET /reports/{report_id}`.
-   - Render per-model summary table (pass/fail/duration/disqualified).
-3. Phase C: Report drill-down.
+1. Phase A: Workflow trigger + status polling. (Completed)
+2. Phase B: Report fetch + summary. (Completed)
+3. Phase C: Report drill-down. (Pending)
    - Show per-run rows and filtering by model/profile.
-4. Phase D: Browser E2E.
+4. Phase D: Browser E2E. (Pending)
    - Add Playwright for auth check -> run smoke -> report visible path.
 
 ## Frontend Test Tracks

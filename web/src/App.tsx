@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import type { CodexAuthStatus, SmokeRunResponse, TmuxCommandResponse } from "./contracts";
+import type { BenchmarkReport, CodexAuthStatus, SmokeRunResponse, TmuxCommandResponse } from "./contracts";
 import {
   fetchCodexAuthStatus,
   fetchCandidates,
+  fetchReport,
+  fetchReports,
   fetchRunOutput,
   fetchSmokeRun,
   fetchTasks,
@@ -70,6 +72,10 @@ export default function App() {
   const [smokeError, setSmokeError] = useState<string | null>(null);
   const [smokeRun, setSmokeRun] = useState<SmokeRunResponse | null>(null);
   const [smokePollTick, setSmokePollTick] = useState(0);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [latestReport, setLatestReport] = useState<BenchmarkReport | null>(null);
+  const [latestReportSource, setLatestReportSource] = useState<string | null>(null);
   const smokePollAttemptRef = useRef(0);
   const smokePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [codexAuthStatus, setCodexAuthStatus] = useState<CodexAuthStatus | null>(null);
@@ -208,6 +214,39 @@ export default function App() {
       setSmokeError((error as Error).message);
     } finally {
       setSmokeBusy(false);
+    }
+  }
+
+  async function viewLatestReport(): Promise<void> {
+    setReportBusy(true);
+    setReportError(null);
+
+    try {
+      let reportId = smokeRun?.report_id ?? undefined;
+      let source = "smoke run";
+
+      if (!reportId) {
+        const list = await fetchReports(1);
+        reportId = list.reports[0]?.report_id;
+        source = "reports list";
+      }
+
+      if (!reportId) {
+        setLatestReport(null);
+        setLatestReportSource(null);
+        setReportError("No reports are available yet");
+        return;
+      }
+
+      const report = await fetchReport(reportId);
+      setLatestReport(report);
+      setLatestReportSource(source);
+    } catch (error) {
+      setLatestReport(null);
+      setLatestReportSource(null);
+      setReportError((error as Error).message);
+    } finally {
+      setReportBusy(false);
     }
   }
 
@@ -481,6 +520,9 @@ export default function App() {
             disabled={smokeBusy || !smokeRun?.run_id}
           >
             Refresh Status
+          </button>{" "}
+          <button onClick={() => void viewLatestReport()} disabled={reportBusy}>
+            View Latest Report
           </button>
         </p>
         {smokeBusy ? <p>Running smoke action...</p> : null}
@@ -503,6 +545,63 @@ export default function App() {
           </>
         ) : (
           <pre>No smoke run started yet.</pre>
+        )}
+      </section>
+
+      <section>
+        <h2>Latest Report</h2>
+        <p>Fetch the newest benchmark report and render model-level summary.</p>
+        {reportBusy ? <p>Loading report...</p> : null}
+        {reportError ? <p>Report retrieval failed: {reportError}</p> : null}
+        {latestReport ? (
+          <>
+            <p>
+              report_id={latestReport.report_id} | generated_at={latestReport.generated_at} | source=
+              {latestReportSource ?? "n/a"}
+            </p>
+            <p>
+              total_tasks={latestReport.total_tasks} | total_runs={latestReport.total_runs} | total_events=
+              {latestReport.total_events}
+            </p>
+            <table>
+              <thead>
+                <tr>
+                  <th>model_key</th>
+                  <th>provider</th>
+                  <th>model</th>
+                  <th>profile</th>
+                  <th>runs</th>
+                  <th>pass</th>
+                  <th>fail</th>
+                  <th>candidates</th>
+                  <th>eligible</th>
+                  <th>disqualified</th>
+                  <th>output_bytes</th>
+                  <th>avg_duration_ms</th>
+                </tr>
+              </thead>
+              <tbody>
+                {latestReport.models.map((modelSummary) => (
+                  <tr key={modelSummary.model_key}>
+                    <td>{modelSummary.model_key}</td>
+                    <td>{modelSummary.provider ?? "-"}</td>
+                    <td>{modelSummary.model ?? "-"}</td>
+                    <td>{modelSummary.profile ?? "-"}</td>
+                    <td>{modelSummary.runs}</td>
+                    <td>{modelSummary.pass_count}</td>
+                    <td>{modelSummary.fail_count}</td>
+                    <td>{modelSummary.candidate_total}</td>
+                    <td>{modelSummary.candidate_eligible}</td>
+                    <td>{modelSummary.candidate_disqualified}</td>
+                    <td>{modelSummary.output_bytes}</td>
+                    <td>{modelSummary.avg_duration_ms ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        ) : (
+          <pre>No report loaded yet.</pre>
         )}
       </section>
 

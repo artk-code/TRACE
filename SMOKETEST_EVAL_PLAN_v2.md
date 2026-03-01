@@ -1,6 +1,6 @@
 # TRACE Smoke + Eval Plan v2
 
-Date: 2026-02-28  
+Date: 2026-03-01  
 Depends on: `AGENTS.md`, `BUILD_SEQUENCE_PLAN_v3.md`
 
 ## Real-User Smoke Test Target
@@ -31,21 +31,23 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
   - `POST /smoke/runs`
   - `GET /smoke/runs/{run_id}`
   - preflights session/target and writes benchmark summary on completion
+- Report retrieval endpoints are active:
+  - `GET /reports`
+  - `GET /reports/{report_id}`
+- Web UI smoke/report flow is active:
+  - run smoke
+  - poll status
+  - view latest report summary
 
 ## Confirmed Gaps
-- No `GET /reports` / `GET /reports/{report_id}` API for UI retrieval.
-- Web UI has not yet wired smoke workflow trigger + polling.
 - No deterministic task pack + expected scoring contract.
 - No browser E2E suite verifying end-to-end smoke behavior.
 
 ## Milestones
-1. M2: Report retrieval APIs.
-   - `GET /reports`
-   - `GET /reports/{report_id}`
-2. M3: Minimal web flow.
-   - Run smoke, poll status, view latest report.
-3. M4: Deterministic evaluator seed pack.
-4. M5: Playwright smoke tests + CI gate.
+1. M2: Report retrieval APIs. (Completed)
+2. M3: Minimal web flow. (Completed)
+3. M4: Deterministic evaluator seed pack. (Pending)
+4. M5: Playwright smoke tests + CI gate. (Pending)
 
 ## Acceptance Criteria
 - At least 3 lanes can run a web-triggered smoke flow against one server/root.

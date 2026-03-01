@@ -1,14 +1,18 @@
 import {
+  benchmarkReportSchema,
   candidateSummarySchema,
   codexAuthStatusSchema,
   outputChunkSchema,
+  reportListResponseSchema,
   smokeRunResponseSchema,
   taskResponseSchema,
   tmuxCommandResponseSchema,
   timelineEventSchema,
+  type BenchmarkReport,
   type CandidateSummary,
   type CodexAuthStatus,
   type OutputChunk,
+  type ReportListResponse,
   type SmokeRunResponse,
   type TaskResponse,
   type TmuxCommandResponse,
@@ -28,6 +32,8 @@ const outputListSchema = outputChunkSchema.array();
 const tmuxCommandSchema = tmuxCommandResponseSchema;
 const codexAuthStatusGuard = codexAuthStatusSchema;
 const smokeRunResponseGuard = smokeRunResponseSchema;
+const reportListResponseGuard = reportListResponseSchema;
+const benchmarkReportGuard = benchmarkReportSchema;
 
 export function parseTaskResponse(raw: unknown): TaskResponse {
   return taskResponseSchema.parse(raw);
@@ -59,6 +65,14 @@ export function parseCodexAuthStatus(raw: unknown): CodexAuthStatus {
 
 export function parseSmokeRunResponse(raw: unknown): SmokeRunResponse {
   return smokeRunResponseGuard.parse(raw);
+}
+
+export function parseReportListResponse(raw: unknown): ReportListResponse {
+  return reportListResponseGuard.parse(raw);
+}
+
+export function parseBenchmarkReport(raw: unknown): BenchmarkReport {
+  return benchmarkReportGuard.parse(raw);
 }
 
 export function filterCandidates(
