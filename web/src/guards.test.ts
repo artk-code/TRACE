@@ -179,6 +179,14 @@ describe("smoke_run_response_guard", () => {
 });
 
 describe("report_list_response_guard", () => {
+  it("accepts empty reports list response", () => {
+    const payload = {
+      reports: [],
+    };
+
+    expect(parseReportListResponse(payload).reports).toEqual([]);
+  });
+
   it("accepts reports list response shape", () => {
     const payload = {
       reports: [
@@ -221,6 +229,55 @@ describe("report_list_response_guard", () => {
 });
 
 describe("benchmark_report_guard", () => {
+  it("accepts benchmark report with nullable optional run fields", () => {
+    const payload = {
+      report_id: "report-optional",
+      generated_at: "2026-03-01T08:00:00Z",
+      total_events: 1,
+      total_tasks: 1,
+      total_runs: 1,
+      models: [
+        {
+          model_key: "unknown-provider:unknown-model:unknown-profile",
+          model: null,
+          provider: null,
+          profile: null,
+          runs: 1,
+          pass_count: 0,
+          fail_count: 0,
+          candidate_total: 0,
+          candidate_eligible: 0,
+          candidate_disqualified: 0,
+          output_bytes: 0,
+          avg_duration_ms: null,
+        },
+      ],
+      runs: [
+        {
+          run_id: "RUN-OPTIONAL-1",
+          task_id: "TASK-OPTIONAL-1",
+          model: null,
+          provider: null,
+          profile: null,
+          worker_id: null,
+          lease_epoch: null,
+          started_at: null,
+          completed_at: null,
+          duration_ms: null,
+          candidate_total: 0,
+          candidate_eligible: 0,
+          candidate_disqualified: 0,
+          output_chunks: 0,
+          output_bytes: 0,
+          verdict: null,
+          passed: null,
+        },
+      ],
+    };
+
+    expect(parseBenchmarkReport(payload).runs[0]?.run_id).toBe("RUN-OPTIONAL-1");
+  });
+
   it("accepts benchmark report response shape", () => {
     const payload = {
       report_id: "report-123",

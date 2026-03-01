@@ -6,4 +6,5 @@
 /web/playwright-report
 /web/test-results
 /.trace
+/.trace-smoke
 .DS_Store

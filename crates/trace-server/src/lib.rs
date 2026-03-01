@@ -3875,6 +3875,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_reports_rejects_limit_zero() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports?limit=0")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("limit must be between"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_reports_rejects_limit_above_max() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let app = build_test_app(&root, &store);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/reports?limit=201")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("limit must be between"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
     async fn test_get_report_rejects_invalid_report_id() {
         let root = unique_temp_root();
         let store = seed_event_log(&root);

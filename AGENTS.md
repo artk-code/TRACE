@@ -191,12 +191,16 @@ Prerequisite:
 - `test_smoke_run_history_limit_prunes_old_terminal_runs`
 - `test_get_reports_returns_empty_when_reports_directory_missing`
 - `test_get_reports_lists_only_json_and_sorts_latest_first`
+- `test_get_reports_rejects_limit_zero`
+- `test_get_reports_rejects_limit_above_max`
 - `test_get_report_rejects_invalid_report_id`
 - `test_get_report_rejects_path_traversal_tokens`
 - `test_get_report_returns_not_found_for_missing_report`
 - `test_get_report_returns_json_payload_for_existing_report`
 - `web/src/guards.test.ts` runtime schema guard coverage
 - `web/tests/phase0-smoke.spec.ts` browser E2E smoke (Playwright)
+- `web/tests/phase0-auth-remediation.spec.ts` browser auth remediation smoke (Playwright)
+- `web/tests/phase0-smoke-preflight-errors.spec.ts` browser smoke preflight error handling (Playwright)
 
 ## Exit Criteria
 - Browser UI can trigger and observe a full multi-lane smoke run.

@@ -35,6 +35,24 @@ Artifacts:
 - `/tmp/trace-reports-latest.json`
 - Optional screenshot path(s)
 
+### Sign-Off Run 1
+- Date: 2026-03-01T09:57:48Z
+- Operator: Codex agent
+- Host OS: Darwin 25.2.0
+- TRACE commit: `d1801ca` (plus local completion-candidate changes)
+- TRACE_ROOT: `/Users/artk/Documents/GitHub/TRACE/.trace-smoke`
+- TRACE_SERVER_ADDR: `127.0.0.1:18080`
+- tmux session: `trace-smoke`
+- smoke run_id: `smoke-1772359038982-1`
+- report_id: `smoke-smoke-1772359038982-1`
+- Smoke terminal status (`succeeded|failed`): `succeeded`
+- Notes: Real tmux-backed smoke run completed and report was generated/retrieved via live server APIs. Browser UI interaction still requires explicit human-run confirmation per runbook.
+
+Artifacts:
+- `/tmp/trace-smoke-run.json`
+- `/tmp/trace-reports-latest.json`
+- Optional screenshot path(s): not captured in this run
+
 ## Final Verdict
 - [ ] Human QA run executed against real server + tmux target
 - [ ] Artifacts attached and non-empty

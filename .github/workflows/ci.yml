@@ -11,6 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Run Rust fmt check
+        run: cargo fmt --all --check
+      - name: Run Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run Rust tests
         run: cargo test --workspace
 
@@ -31,6 +35,8 @@ jobs:
         run: pnpm install --no-frozen-lockfile
       - name: Run web unit tests
         run: pnpm test
+      - name: Run web build
+        run: pnpm build
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
       - name: Run web e2e tests
