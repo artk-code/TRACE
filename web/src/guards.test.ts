@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeOutputChunk,
   parseCodexAuthStatus,
+  parseSmokeRunResponse,
   parseTaskResponse,
   parseTmuxCommandResponse,
 } from "./guards";
@@ -126,5 +127,51 @@ describe("codex_auth_status_guard", () => {
     };
 
     expect(() => parseCodexAuthStatus(payload)).toThrow();
+  });
+});
+
+describe("smoke_run_response_guard", () => {
+  it("accepts smoke run response shape", () => {
+    const payload = {
+      run_id: "smoke-123",
+      status: "running",
+      created_at: "2026-03-01T08:00:00Z",
+      updated_at: "2026-03-01T08:00:01Z",
+      session: "trace-smoke",
+      target: "trace-smoke:lanes",
+      profiles: ["flash", "high", "extra"],
+      lane_names: ["smoke-flash-123", "smoke-high-123", "smoke-extra-123"],
+      runner_timeout_sec: 180,
+      current_step: "waiting_for_lanes",
+      error: null,
+      report_id: null,
+      json_report_path: null,
+      markdown_report_path: null,
+      summary: null,
+    };
+
+    expect(parseSmokeRunResponse(payload).status).toBe("running");
+  });
+
+  it("rejects invalid smoke run status", () => {
+    const payload = {
+      run_id: "smoke-123",
+      status: "in_progress",
+      created_at: "2026-03-01T08:00:00Z",
+      updated_at: "2026-03-01T08:00:01Z",
+      session: "trace-smoke",
+      target: "trace-smoke:lanes",
+      profiles: ["flash"],
+      lane_names: ["smoke-flash-123"],
+      runner_timeout_sec: 180,
+      current_step: "queued",
+      error: null,
+      report_id: null,
+      json_report_path: null,
+      markdown_report_path: null,
+      summary: null,
+    };
+
+    expect(() => parseSmokeRunResponse(payload)).toThrow();
   });
 });

@@ -1,12 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import type { CodexAuthStatus, TmuxCommandResponse } from "./contracts";
+import type { CodexAuthStatus, SmokeRunResponse, TmuxCommandResponse } from "./contracts";
 import {
   fetchCodexAuthStatus,
   fetchCandidates,
   fetchRunOutput,
+  fetchSmokeRun,
   fetchTasks,
+  postSmokeRun,
   postTmuxAddLane,
   postTmuxAddPane,
   postTmuxStart,
@@ -32,6 +34,18 @@ function optionalPositiveInt(value: string): number | undefined {
   return parsed;
 }
 
+function parseProfilesInput(value: string): string[] | undefined {
+  const profiles = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  return profiles.length > 0 ? profiles : undefined;
+}
+
+function isSmokeTerminal(status: SmokeRunResponse["status"]): boolean {
+  return status === "succeeded" || status === "failed";
+}
+
 export default function App() {
   const [includeDisqualified, setIncludeDisqualified] = useState(false);
   const [session, setSession] = useState("trace-smoke");
@@ -48,6 +62,16 @@ export default function App() {
   const [paneWaitForRunner, setPaneWaitForRunner] = useState(true);
   const [paneRunnerTimeoutSec, setPaneRunnerTimeoutSec] = useState("180");
   const [paneTarget, setPaneTarget] = useState("");
+  const [smokeTarget, setSmokeTarget] = useState("");
+  const [smokeProfiles, setSmokeProfiles] = useState("flash,high,extra");
+  const [smokeRunnerTimeoutSec, setSmokeRunnerTimeoutSec] = useState("180");
+  const [smokeReportId, setSmokeReportId] = useState("");
+  const [smokeBusy, setSmokeBusy] = useState(false);
+  const [smokeError, setSmokeError] = useState<string | null>(null);
+  const [smokeRun, setSmokeRun] = useState<SmokeRunResponse | null>(null);
+  const [smokePollTick, setSmokePollTick] = useState(0);
+  const smokePollAttemptRef = useRef(0);
+  const smokePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [codexAuthStatus, setCodexAuthStatus] = useState<CodexAuthStatus | null>(null);
   const [codexAuthBusy, setCodexAuthBusy] = useState(false);
   const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
@@ -90,7 +114,7 @@ export default function App() {
     return outputQuery.data.map((chunk) => decodeOutputChunk(chunk)).join("\n");
   }, [outputQuery.data]);
 
-  const defaultPaneTarget = useMemo(() => {
+  const defaultTmuxTarget = useMemo(() => {
     const normalized = optionalValue(session) ?? "trace-smoke";
     return `${normalized}:lanes`;
   }, [session]);
@@ -145,6 +169,80 @@ export default function App() {
       throw new Error(`Codex auth required before ${actionName}. Run: ${command}`);
     }
   }
+
+  async function refreshSmokeRunStatus(explicitRunId?: string): Promise<void> {
+    const runId = explicitRunId ?? smokeRun?.run_id;
+    if (!runId) {
+      setSmokeError("No smoke run id is available yet");
+      return;
+    }
+
+    setSmokeBusy(true);
+    setSmokeError(null);
+    try {
+      const next = await fetchSmokeRun(runId);
+      setSmokeRun(next);
+    } catch (error) {
+      setSmokeError((error as Error).message);
+    } finally {
+      setSmokeBusy(false);
+    }
+  }
+
+  async function runSmokeWorkflow(): Promise<void> {
+    setSmokeBusy(true);
+    setSmokeError(null);
+    try {
+      await ensureCodexAuthPreflight("smoke-run");
+      const started = await postSmokeRun({
+        session: optionalValue(session),
+        target: optionalValue(smokeTarget) ?? defaultTmuxTarget,
+        profiles: parseProfilesInput(smokeProfiles),
+        runner_timeout_sec: optionalPositiveInt(smokeRunnerTimeoutSec),
+        report_id: optionalValue(smokeReportId),
+      });
+      smokePollAttemptRef.current = 0;
+      setSmokePollTick(0);
+      setSmokeRun(started);
+    } catch (error) {
+      setSmokeError((error as Error).message);
+    } finally {
+      setSmokeBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (smokePollTimerRef.current) {
+      clearTimeout(smokePollTimerRef.current);
+      smokePollTimerRef.current = null;
+    }
+
+    if (!smokeRun || isSmokeTerminal(smokeRun.status)) {
+      smokePollAttemptRef.current = 0;
+      return;
+    }
+
+    const runId = smokeRun.run_id;
+    const delaySec = Math.min(1 + smokePollAttemptRef.current, 3);
+    smokePollTimerRef.current = setTimeout(async () => {
+      smokePollAttemptRef.current += 1;
+      try {
+        const next = await fetchSmokeRun(runId);
+        setSmokeError(null);
+        setSmokeRun(next);
+      } catch (error) {
+        setSmokeError((error as Error).message);
+        setSmokePollTick((value) => value + 1);
+      }
+    }, delaySec * 1000);
+
+    return () => {
+      if (smokePollTimerRef.current) {
+        clearTimeout(smokePollTimerRef.current);
+        smokePollTimerRef.current = null;
+      }
+    };
+  }, [smokeRun, smokePollTick]);
 
   return (
     <main style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", padding: 20 }}>
@@ -246,7 +344,7 @@ export default function App() {
             Add-Pane Target:
             <input
               value={paneTarget}
-              placeholder={defaultPaneTarget}
+              placeholder={defaultTmuxTarget}
               onChange={(event) => setPaneTarget(event.target.value)}
             />
           </label>
@@ -305,7 +403,7 @@ export default function App() {
                   session: optionalValue(session),
                   lane_name: paneLaneName.trim(),
                   profile: optionalValue(paneProfile),
-                  target: optionalValue(paneTarget) ?? defaultPaneTarget,
+                  target: optionalValue(paneTarget) ?? defaultTmuxTarget,
                   mode: paneMode === "interactive" ? undefined : paneMode,
                   wait_for_runner: paneMode === "runner" ? paneWaitForRunner : undefined,
                   runner_timeout_sec:
@@ -336,6 +434,75 @@ export default function App() {
           <pre>{JSON.stringify(orchestrationResult, null, 2)}</pre>
         ) : (
           <pre>No orchestration command executed yet.</pre>
+        )}
+      </section>
+
+      <section>
+        <h2>Smoke Workflow</h2>
+        <p>Run multi-lane smoke workflow and poll run status.</p>
+        <fieldset disabled={smokeBusy || Boolean(orchestrationBusy)}>
+          <label>
+            Session:
+            <input value={session} onChange={(event) => setSession(event.target.value)} />
+          </label>
+          <label>
+            Target:
+            <input
+              value={smokeTarget}
+              placeholder={defaultTmuxTarget}
+              onChange={(event) => setSmokeTarget(event.target.value)}
+            />
+          </label>
+          <label>
+            Profiles (comma-separated):
+            <input
+              value={smokeProfiles}
+              onChange={(event) => setSmokeProfiles(event.target.value)}
+            />
+          </label>
+          <label>
+            Runner Timeout (s):
+            <input
+              value={smokeRunnerTimeoutSec}
+              onChange={(event) => setSmokeRunnerTimeoutSec(event.target.value)}
+            />
+          </label>
+          <label>
+            Report ID (optional):
+            <input value={smokeReportId} onChange={(event) => setSmokeReportId(event.target.value)} />
+          </label>
+        </fieldset>
+        <p>
+          <button onClick={() => void runSmokeWorkflow()} disabled={smokeBusy || codexAuthBusy}>
+            Run Smoke
+          </button>{" "}
+          <button
+            onClick={() => void refreshSmokeRunStatus()}
+            disabled={smokeBusy || !smokeRun?.run_id}
+          >
+            Refresh Status
+          </button>
+        </p>
+        {smokeBusy ? <p>Running smoke action...</p> : null}
+        {smokeRun && !isSmokeTerminal(smokeRun.status) ? (
+          <p>Auto-polling status while run is active.</p>
+        ) : null}
+        {smokeError ? <p>Smoke workflow failed: {smokeError}</p> : null}
+        {smokeRun ? (
+          <>
+            <p>
+              run_id={smokeRun.run_id} | status={smokeRun.status} | step={smokeRun.current_step}
+            </p>
+            {smokeRun.error ? <p>run error: {smokeRun.error}</p> : null}
+            {smokeRun.report_id ? <p>report_id={smokeRun.report_id}</p> : null}
+            {smokeRun.summary ? (
+              <pre>{JSON.stringify(smokeRun.summary, null, 2)}</pre>
+            ) : (
+              <pre>No benchmark summary available yet.</pre>
+            )}
+          </>
+        ) : (
+          <pre>No smoke run started yet.</pre>
         )}
       </section>
 

@@ -2,12 +2,14 @@ import {
   candidateSummarySchema,
   codexAuthStatusSchema,
   outputChunkSchema,
+  smokeRunResponseSchema,
   taskResponseSchema,
   tmuxCommandResponseSchema,
   timelineEventSchema,
   type CandidateSummary,
   type CodexAuthStatus,
   type OutputChunk,
+  type SmokeRunResponse,
   type TaskResponse,
   type TmuxCommandResponse,
   type TimelineEvent,
@@ -25,6 +27,7 @@ const candidateListSchema = candidateSummarySchema.array();
 const outputListSchema = outputChunkSchema.array();
 const tmuxCommandSchema = tmuxCommandResponseSchema;
 const codexAuthStatusGuard = codexAuthStatusSchema;
+const smokeRunResponseGuard = smokeRunResponseSchema;
 
 export function parseTaskResponse(raw: unknown): TaskResponse {
   return taskResponseSchema.parse(raw);
@@ -52,6 +55,10 @@ export function parseTmuxCommandResponse(raw: unknown): TmuxCommandResponse {
 
 export function parseCodexAuthStatus(raw: unknown): CodexAuthStatus {
   return codexAuthStatusGuard.parse(raw);
+}
+
+export function parseSmokeRunResponse(raw: unknown): SmokeRunResponse {
+  return smokeRunResponseGuard.parse(raw);
 }
 
 export function filterCandidates(

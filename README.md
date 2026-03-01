@@ -83,15 +83,18 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
    - `Status`
    - `Add Lane` / `Add Pane` (`mode=runner` for scripted lane writes)
    - `Stop Session`
+4. Use the **Smoke Workflow** section:
+   - `Run Smoke` (`POST /smoke/runs`)
+   - `Refresh Status` (`GET /smoke/runs/{run_id}`)
+   - active runs auto-poll until terminal status
 
 ## Web UI Status (2026-03-01)
 - Current UI supports:
   - Codex auth preflight check.
   - tmux orchestration controls (`start`, `status`, `add-lane`, `add-pane`, `stop`).
+  - Smoke workflow controls (`Run Smoke`, `Refresh Status`) with automatic active-run polling.
   - Read-only task/candidate/output views.
 - Not yet implemented in UI:
-  - `Run Smoke` action (`POST /smoke/runs`).
-  - Smoke-run status polling (`GET /smoke/runs/{run_id}`).
   - Report retrieval/rendering flow in the UI (`View Latest Report`).
 
 ## Codex Auth Policy + Preflight
@@ -294,11 +297,12 @@ Note:
 - Report retrieval APIs are implemented:
   - `GET /reports`
   - `GET /reports/{report_id}`
-- Next milestone is web smoke trigger/poll/report UI wiring.
+- Web UI now supports smoke run trigger/poll.
+- Next milestone is report retrieval/rendering in the web UI (`View Latest Report`).
 
 ## Immediate Blocker-Removal Plan
-1. Wire minimal web smoke flow:
-   - `Run Smoke`, `Refresh Status`, `View Latest Report`
+1. Wire report retrieval/rendering flow in web UI:
+   - `View Latest Report` via `GET /reports` and `GET /reports/{report_id}`
 2. Add deterministic seeded eval pack so scores are stable.
 3. Add one Playwright smoke test and gate CI on it.
 4. Add merge/PR output pipeline after smoke stability.

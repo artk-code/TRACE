@@ -87,6 +87,54 @@ export const codexAuthStatusSchema = z
   })
   .strict();
 
+export const benchmarkModelSummarySchema = z
+  .object({
+    model_key: z.string(),
+    model: z.string().optional().nullable(),
+    provider: z.string().optional().nullable(),
+    profile: z.string().optional().nullable(),
+    runs: z.number().int().nonnegative(),
+    pass_count: z.number().int().nonnegative(),
+    fail_count: z.number().int().nonnegative(),
+    candidate_total: z.number().int().nonnegative(),
+    candidate_eligible: z.number().int().nonnegative(),
+    candidate_disqualified: z.number().int().nonnegative(),
+    output_bytes: z.number().int().nonnegative(),
+    avg_duration_ms: z.number().optional().nullable(),
+  })
+  .strict();
+
+export const benchmarkSummarySchema = z
+  .object({
+    total_tasks: z.number().int().nonnegative(),
+    total_runs: z.number().int().nonnegative(),
+    total_events: z.number().int().nonnegative(),
+    models: z.array(benchmarkModelSummarySchema),
+  })
+  .strict();
+
+export const smokeRunStatusSchema = z.enum(["queued", "running", "succeeded", "failed"]);
+
+export const smokeRunResponseSchema = z
+  .object({
+    run_id: z.string(),
+    status: smokeRunStatusSchema,
+    created_at: z.string(),
+    updated_at: z.string(),
+    session: z.string(),
+    target: z.string(),
+    profiles: z.array(z.string()),
+    lane_names: z.array(z.string()),
+    runner_timeout_sec: z.number().int().positive(),
+    current_step: z.string(),
+    error: z.string().optional().nullable(),
+    report_id: z.string().optional().nullable(),
+    json_report_path: z.string().optional().nullable(),
+    markdown_report_path: z.string().optional().nullable(),
+    summary: benchmarkSummarySchema.optional().nullable(),
+  })
+  .strict();
+
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 export type TaskResponse = z.infer<typeof taskResponseSchema>;
 export type TimelineEvent = z.infer<typeof timelineEventSchema>;
@@ -94,3 +142,7 @@ export type CandidateSummary = z.infer<typeof candidateSummarySchema>;
 export type OutputChunk = z.infer<typeof outputChunkSchema>;
 export type TmuxCommandResponse = z.infer<typeof tmuxCommandResponseSchema>;
 export type CodexAuthStatus = z.infer<typeof codexAuthStatusSchema>;
+export type BenchmarkModelSummary = z.infer<typeof benchmarkModelSummarySchema>;
+export type BenchmarkSummary = z.infer<typeof benchmarkSummarySchema>;
+export type SmokeRunStatus = z.infer<typeof smokeRunStatusSchema>;
+export type SmokeRunResponse = z.infer<typeof smokeRunResponseSchema>;

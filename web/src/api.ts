@@ -2,6 +2,7 @@ import type {
   CandidateSummary,
   CodexAuthStatus,
   OutputChunk,
+  SmokeRunResponse,
   TaskResponse,
   TimelineEvent,
   TmuxCommandResponse,
@@ -10,6 +11,7 @@ import {
   parseCandidates,
   parseCodexAuthStatus,
   parseOutput,
+  parseSmokeRunResponse,
   parseTaskList,
   parseTaskResponse,
   parseTimeline,
@@ -45,6 +47,14 @@ export type TmuxAddPaneRequest = {
   mode?: string;
   wait_for_runner?: boolean;
   runner_timeout_sec?: number;
+};
+
+export type SmokeRunStartRequest = {
+  session?: string;
+  profiles?: string[];
+  target?: string;
+  runner_timeout_sec?: number;
+  report_id?: string;
 };
 
 async function requestJson(path: string, init?: RequestInit): Promise<unknown> {
@@ -155,4 +165,14 @@ export async function postTmuxStop(request: TmuxSessionRequest): Promise<TmuxCom
 export async function fetchCodexAuthStatus(): Promise<CodexAuthStatus> {
   const raw = await getJson("/orchestrator/auth/codex/status");
   return parseCodexAuthStatus(raw);
+}
+
+export async function postSmokeRun(request: SmokeRunStartRequest): Promise<SmokeRunResponse> {
+  const raw = await postJson("/smoke/runs", request);
+  return parseSmokeRunResponse(raw);
+}
+
+export async function fetchSmokeRun(runId: string): Promise<SmokeRunResponse> {
+  const raw = await getJson(`/smoke/runs/${runId}`);
+  return parseSmokeRunResponse(raw);
 }

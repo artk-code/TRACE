@@ -46,6 +46,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Smoke run history is bounded:
   - `TRACE_SMOKE_RUN_HISTORY_LIMIT` (default: `200`)
 - Web UI can call tmux orchestration endpoints and display command results/errors.
+- Web UI can trigger smoke workflow runs and poll smoke status from browser controls.
 
 ## Smoketest Readiness (2026-02-28)
 - Shared-server ingest safety (lock + lease fencing): **82%**
@@ -63,13 +64,15 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Smoke workflow API coordinates multi-lane runner launch, wait, and benchmark writeback.
 - Report retrieval APIs expose benchmark JSON over HTTP for browser consumption.
 - Web UI includes orchestration controls for start/status/add-lane/add-pane/stop and auth preflight status.
+- Web UI includes smoke workflow controls for `Run Smoke` + `Refresh Status` with automatic active-run polling.
 - Lane shells support two execution modes:
   - `interactive` (manual copy/paste flow)
   - `runner` (scripted claim/run/output/candidate/verdict/release flow)
 - Benchmark report generation writes JSON+Markdown artifacts with sanitized report IDs.
 
 ## Known Gaps Blocking "Super Smoketest"
-- Browser UI does not yet drive `POST /smoke/runs` / `GET /smoke/runs/{run_id}`.
+- Browser UI does not yet retrieve/render reports via `GET /reports` / `GET /reports/{report_id}`.
+- Browser UI does not yet provide `View Latest Report` summary table flow.
 - Smoke workflow currently requires an existing tmux session and valid target (`session` + `target` preflight).
 - Benchmark report is aggregation-oriented, not a deterministic quality evaluator.
 - No seeded deterministic task/eval pack with expected-output contract.
@@ -78,9 +81,9 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No merge/PR pipeline from winning or stacked candidates.
 
 ## Active Priorities
-1. Minimal web smoke flow.
-  - Add `Run Smoke`, `Refresh Status`, `View Latest Report` UI flow.
-  - Poll smoke run status and render summary from report APIs.
+1. Report view flow in web UI.
+  - Add `View Latest Report` using `GET /reports` + `GET /reports/{report_id}`.
+  - Render model/profile summary table in-browser from report payload.
 2. Deterministic eval contract.
   - Add seeded task pack + expected-output scoring contract.
   - Make benchmark quality signals reproducible across reruns.
@@ -91,7 +94,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
   - Add winning/stacked candidate export and Git-compatible PR path.
 
 ## Immediate Build Sequence
-1. Wire web controls for run/poll/view report.
+1. Wire `View Latest Report` UI flow backed by `/reports` APIs.
 2. Add deterministic seeded eval pack.
 3. Add one stable Playwright smoke and CI gate.
 4. Add merge/PR workflow after smoke is reliable.
@@ -136,6 +139,7 @@ Prerequisite:
 - Fixed: smoke workflow preflights tmux session/target before enqueue, failing fast instead of failing later in runner spawn.
 - Fixed: smoke benchmark event scoping now filters by lane identity, preventing unrelated events from contaminating reports.
 - Fixed: smoke run in-memory history is bounded with pruning (`TRACE_SMOKE_RUN_HISTORY_LIMIT`).
+- Fixed: web smoke polling now keeps retrying after transient `GET /smoke/runs/{run_id}` failures.
 - Open: pane command injection can race if commands are blasted without pacing.
 - Open: no autonomous lane lifecycle manager yet.
 
