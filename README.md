@@ -50,6 +50,8 @@ corepack prepare pnpm@9 --activate
 cd /Users/artk/Documents/GitHub/TRACE
 pnpm install
 ```
+Detailed Ubuntu operator/runbook flow is documented in:
+- [docs/LINUX_BUILD_HUMAN.md](/Users/artk/Documents/GitHub/TRACE/docs/LINUX_BUILD_HUMAN.md)
 
 ## Build + Test
 1. Rust formatting gate:
@@ -435,7 +437,6 @@ Note:
 - Report retrieval APIs are implemented:
   - `GET /reports`
   - `GET /reports/{report_id}`
-- Web UI now supports tmux pane browsing + live pane capture + pane input send, agent run trigger/poll, and latest report retrieval/rendering.
 - Web UI now supports tmux pane browsing + live capture + pane input send, agent run trigger/poll, and latest report retrieval/rendering.
 - Playwright E2E smoke is implemented and CI-gated.
 - Phase 0 sign-off artifacts are tracked under:
