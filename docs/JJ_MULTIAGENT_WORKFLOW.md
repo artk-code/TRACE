@@ -85,6 +85,45 @@ This runs:
 - `jj bookmark set <bookmark> -r <revset>`
 - `jj git push --remote <remote> --bookmark <bookmark>`
 
+## Integrate Good Lanes And Drop Bad Lanes
+When multiple agents propose competing changes, compose only the winning revisions:
+
+```bash
+scripts/trace-jj.sh integrate \
+  --base trunk() \
+  --good good-a \
+  --good good-b \
+  --bad bad-a \
+  --message "feat: integrate selected agent revisions"
+```
+
+What this does:
+- creates a new integration change on `--base`
+- squashes each `--good` revision into the integration change
+- abandons each `--bad` revision (optional)
+- keeps a single integration message for the composed change
+
+Then publish the integration result:
+
+```bash
+scripts/trace-jj.sh publish agent/integration/selected @ origin
+```
+
+## Browser + API Controls
+TRACE web UI now exposes a **JJ Workflow** panel that calls server-side orchestration routes:
+
+- `POST /orchestrator/jj/bootstrap`
+- `POST /orchestrator/jj/status`
+- `POST /orchestrator/jj/lane-add`
+- `POST /orchestrator/jj/lane-list`
+- `POST /orchestrator/jj/lane-forget`
+- `POST /orchestrator/jj/lane-root`
+- `POST /orchestrator/jj/patch`
+- `POST /orchestrator/jj/publish`
+- `POST /orchestrator/jj/integrate`
+
+The server executes `scripts/trace-jj.sh` for these actions (override path with `TRACE_JJ_ORCH_SCRIPT`).
+
 ## Lane Cleanup
 Forget a lane workspace in jj metadata:
 

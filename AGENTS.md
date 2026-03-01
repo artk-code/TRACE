@@ -43,6 +43,9 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Backend tmux orchestration endpoints exist:
   - `POST /orchestrator/tmux/start|status|add-lane|add-pane|stop`
   - `POST /orchestrator/tmux/snapshot|capture|send-keys` (session tree + pane capture/input)
+- Backend jj orchestration endpoints exist:
+  - `POST /orchestrator/jj/bootstrap|status|lane-add|lane-list|lane-forget|lane-root|patch|publish|integrate`
+  - route execution is script-backed via `scripts/trace-jj.sh` (override: `TRACE_JJ_ORCH_SCRIPT`)
 - Backend agent workflow endpoints exist:
   - `POST /agent/runs` (legacy alias: `POST /smoke/runs`)
   - `GET /agent/runs/{run_id}` (legacy alias: `GET /smoke/runs/{run_id}`)
@@ -62,8 +65,9 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Web UI can browse tmux panes, stream live pane output, and send pane input.
 - Web UI can trigger agent workflow runs and poll run status from browser controls.
 - Web UI can fetch/render latest benchmark report summaries from `/reports` APIs.
+- Web UI can trigger jj workflow actions (bootstrap/status/lane management/patch/publish/integrate) from browser controls.
 - Browser E2E smoke harness exists (Playwright) and CI runs `pnpm --dir web test:e2e`.
-- `jj` repo bootstrap is available for multi-agent patch lanes (`jj git init` + `scripts/trace-jj.sh`).
+- `jj` workflow helper is available for multi-agent patch lanes (`jj git init` + `scripts/trace-jj.sh`).
 
 ## Smoketest Readiness (2026-03-01)
 - Shared-server ingest safety (lock + lease fencing): **82%**
@@ -85,6 +89,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - Web UI includes terminal workspace controls for session tree browsing, pane capture, and pane input send.
 - Web UI includes agent workflow controls for `Run Agents` + `Refresh Status` with automatic active-run polling.
 - Web UI includes `View Latest Report` with latest-report fetch and model summary table rendering.
+- Web UI includes a `JJ Workflow` panel wired to `/orchestrator/jj/*` routes.
 - Playwright E2E covers auth check -> smoke run -> terminal status -> report visibility and is wired into CI.
 - Lane shells support two execution modes:
   - `interactive` (manual copy/paste flow)
@@ -102,7 +107,7 @@ Build a multi-agent evaluation system where multiple Codex lanes run against one
 - No seeded deterministic task/eval pack with expected-output contract.
 - CLI remains read-oriented (`tasks`, `task`) and not smoke-run capable.
 - No merge/PR pipeline from winning or stacked candidates.
-- jj-based multi-agent patch flow is bootstrap-level only (lane workspaces + patch/publish); automated winner selection/stacked merge is still pending.
+- jj-based multi-agent patch flow supports lane workspaces, patch/publish, and selected-revision integration; automated winner selection/stacked merge is still pending.
 
 ## Active Priorities
 1. Phase 0 human QA sign-off.
@@ -168,7 +173,7 @@ Prerequisite:
 - Fixed: smoke workflow preflights tmux session/target before enqueue, failing fast instead of failing later in runner spawn.
 - Fixed: smoke benchmark event scoping now filters by lane identity, preventing unrelated events from contaminating reports.
 - Fixed: smoke run in-memory history is bounded with pruning (`TRACE_SMOKE_RUN_HISTORY_LIMIT`).
-- Fixed: web smoke polling now keeps retrying after transient `GET /smoke/runs/{run_id}` failures.
+- Fixed: web smoke polling now keeps retrying after transient `GET /agent/runs/{run_id}` failures.
 - Fixed: web `View Latest Report` flow fetches benchmark reports via `/reports` and renders model summary table.
 - Fixed: tmux workspace snapshot/capture/send-keys APIs provide structured pane browsing + browser-driven pane input.
 - Fixed: Playwright browser smoke (`auth -> run smoke -> report visible`) is now CI-gated.
@@ -203,6 +208,10 @@ Prerequisite:
 - `test_cors_preflight_allows_local_dev_origin`
 - `test_tmux_start_route_invokes_configured_script_with_expected_args`
 - `test_tmux_add_lane_rejects_invalid_lane_name`
+- `test_jj_bootstrap_route_invokes_configured_script_with_expected_args`
+- `test_jj_lane_add_rejects_invalid_lane_name`
+- `test_jj_integrate_forwards_good_bad_and_message_args`
+- `test_jj_integrate_requires_good_revisions`
 - `test_tmux_add_lane_requires_codex_auth_when_policy_required`
 - `test_tmux_add_pane_allows_when_policy_optional_and_not_logged_in`
 - `test_tmux_add_lane_passes_runner_mode_to_script`
@@ -231,6 +240,7 @@ Prerequisite:
 - `web/tests/phase0-auth-remediation.spec.ts` browser auth remediation smoke (Playwright)
 - `web/tests/phase0-smoke-preflight-errors.spec.ts` browser smoke preflight error handling (Playwright)
 - `web/tests/tmux-workspace.spec.ts` browser tmux workspace pane browse/capture/send-input flow (Playwright)
+- `web/tests/jj-workflow.spec.ts` browser jj workflow control surface (Playwright)
 
 ## Exit Criteria
 - Browser UI can trigger and observe a full multi-lane smoke run.

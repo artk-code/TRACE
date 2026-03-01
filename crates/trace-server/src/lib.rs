@@ -50,12 +50,14 @@ const DEFAULT_CORS_ALLOWED_ORIGINS: [&str; 4] = [
 ];
 const DEFAULT_TMUX_SESSION: &str = "trace-smoke";
 const DEFAULT_TMUX_SCRIPT_PATH: &str = "scripts/trace-smoke-tmux.sh";
+const DEFAULT_JJ_SCRIPT_PATH: &str = "scripts/trace-jj.sh";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const DEFAULT_SMOKE_RUNNER_TIMEOUT_SEC: u64 = 180;
 const DEFAULT_SMOKE_RUN_HISTORY_LIMIT: usize = 200;
 const DEFAULT_TMUX_CAPTURE_LINES: u64 = 200;
 const MAX_TMUX_CAPTURE_LINES: u64 = 5000;
 const MAX_TMUX_SEND_TEXT_CHARS: usize = 4000;
+const MAX_JJ_MESSAGE_CHARS: usize = 4000;
 const DEFAULT_REPORT_LIST_LIMIT: usize = 50;
 const MAX_REPORT_LIST_LIMIT: usize = 200;
 const MAX_RUNNER_TASK_COUNT: u64 = 50;
@@ -523,6 +525,7 @@ struct ApiState {
     replay_store: ReplayCheckpointStore,
     writer_lock: Arc<Mutex<()>>,
     tmux_script_path: PathBuf,
+    jj_script_path: PathBuf,
     codex_bin_path: PathBuf,
     codex_auth_policy: CodexAuthPolicy,
     smoke_run_history_limit: usize,
@@ -661,6 +664,58 @@ struct TmuxSendKeysRequest {
     text: Option<String>,
     key: Option<String>,
     press_enter: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct JjBootstrapRequest {
+    remote: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct JjStatusRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JjLaneAddRequest {
+    lane_name: String,
+    base_revset: Option<String>,
+    destination: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct JjLaneListRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JjLaneNameRequest {
+    lane_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JjPatchRequest {
+    output_path: String,
+    revset: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JjPublishRequest {
+    bookmark: String,
+    revset: Option<String>,
+    remote: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JjIntegrateRequest {
+    base_revset: Option<String>,
+    good_revisions: Vec<String>,
+    bad_revisions: Option<Vec<String>>,
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -891,6 +946,7 @@ pub fn app_router(
     replay_store: ReplayCheckpointStore,
 ) -> Router {
     let tmux_script_path = resolve_tmux_script_path();
+    let jj_script_path = resolve_jj_script_path();
     let codex_bin_path = resolve_codex_bin_path();
     let codex_auth_policy = resolve_codex_auth_policy();
     let smoke_run_history_limit = resolve_smoke_run_history_limit();
@@ -900,6 +956,7 @@ pub fn app_router(
         lease_store,
         replay_store,
         tmux_script_path,
+        jj_script_path,
         codex_bin_path,
         codex_auth_policy,
         smoke_run_history_limit,
@@ -913,6 +970,7 @@ fn app_router_with_tmux_script(
     lease_store: LeaseIndexStore,
     replay_store: ReplayCheckpointStore,
     tmux_script_path: PathBuf,
+    jj_script_path: PathBuf,
     codex_bin_path: PathBuf,
     codex_auth_policy: CodexAuthPolicy,
     smoke_run_history_limit: usize,
@@ -924,6 +982,7 @@ fn app_router_with_tmux_script(
         replay_store,
         writer_lock: Arc::new(Mutex::new(())),
         tmux_script_path,
+        jj_script_path,
         codex_bin_path,
         codex_auth_policy,
         smoke_run_history_limit,
@@ -973,6 +1032,30 @@ fn app_router_with_tmux_script(
         .route("/smoke/runs/{run_id}", get(get_smoke_run_handler))
         .route("/orchestrator/tmux/start", post(post_tmux_start_handler))
         .route("/orchestrator/tmux/status", post(post_tmux_status_handler))
+        .route(
+            "/orchestrator/jj/bootstrap",
+            post(post_jj_bootstrap_handler),
+        )
+        .route("/orchestrator/jj/status", post(post_jj_status_handler))
+        .route("/orchestrator/jj/lane-add", post(post_jj_lane_add_handler))
+        .route(
+            "/orchestrator/jj/lane-list",
+            post(post_jj_lane_list_handler),
+        )
+        .route(
+            "/orchestrator/jj/lane-forget",
+            post(post_jj_lane_forget_handler),
+        )
+        .route(
+            "/orchestrator/jj/lane-root",
+            post(post_jj_lane_root_handler),
+        )
+        .route("/orchestrator/jj/patch", post(post_jj_patch_handler))
+        .route("/orchestrator/jj/publish", post(post_jj_publish_handler))
+        .route(
+            "/orchestrator/jj/integrate",
+            post(post_jj_integrate_handler),
+        )
         .route(
             "/orchestrator/tmux/snapshot",
             post(post_tmux_snapshot_handler),
@@ -1055,6 +1138,15 @@ fn resolve_tmux_script_path() -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_TMUX_SCRIPT_PATH))
+}
+
+fn resolve_jj_script_path() -> PathBuf {
+    std::env::var("TRACE_JJ_ORCH_SCRIPT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_JJ_SCRIPT_PATH))
 }
 
 fn resolve_codex_bin_path() -> PathBuf {
@@ -1245,6 +1337,88 @@ fn validate_trace_server_addr(value: &str) -> Result<(), (StatusCode, Json<ApiEr
         .map_err(|_| bad_request_error("addr must be a valid socket address like 127.0.0.1:18080"))
 }
 
+fn has_control_chars(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_control())
+}
+
+fn validate_nonempty_no_control(
+    field: &str,
+    value: &str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if value.trim().is_empty() {
+        return Err(bad_request_error(format!("{field} cannot be empty")));
+    }
+    if has_control_chars(value) {
+        return Err(bad_request_error(format!(
+            "{field} contains invalid control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_jj_lane_name(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    validate_nonempty_no_control("lane_name", value)?;
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(bad_request_error(
+            "lane_name contains invalid characters; allowed: [A-Za-z0-9._-]",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_jj_bookmark(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    validate_nonempty_no_control("bookmark", value)?;
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
+    {
+        return Err(bad_request_error(
+            "bookmark contains invalid characters; allowed: [A-Za-z0-9._/-]",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_jj_remote(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    validate_nonempty_no_control("remote", value)?;
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(bad_request_error(
+            "remote contains invalid characters; allowed: [A-Za-z0-9._-]",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_jj_revset(
+    field: &str,
+    value: &str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    validate_nonempty_no_control(field, value)
+}
+
+fn validate_jj_path_arg(
+    field: &str,
+    value: &str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    validate_nonempty_no_control(field, value)
+}
+
+fn validate_jj_message(value: &str) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    validate_nonempty_no_control("message", value)?;
+    if value.len() > MAX_JJ_MESSAGE_CHARS {
+        return Err(bad_request_error(format!(
+            "message exceeds max length ({MAX_JJ_MESSAGE_CHARS})"
+        )));
+    }
+    Ok(())
+}
+
 async fn execute_tmux_script_result(
     state: &ApiState,
     args: Vec<String>,
@@ -1264,15 +1438,49 @@ async fn execute_tmux_script_result_with_trim(
     args: Vec<String>,
     trim_output: bool,
 ) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
-    let script_path = state.tmux_script_path.clone();
+    execute_script_result_with_trim(state.tmux_script_path.clone(), args, trim_output, "tmux").await
+}
+
+async fn execute_tmux_script(
+    state: &ApiState,
+    args: Vec<String>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_tmux_script_result(state, args).await.map(Json)
+}
+
+async fn execute_jj_script_result(
+    state: &ApiState,
+    args: Vec<String>,
+) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_script_result_with_trim(state.jj_script_path.clone(), args, true, "jj").await
+}
+
+async fn execute_jj_script(
+    state: &ApiState,
+    args: Vec<String>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_jj_script_result(state, args).await.map(Json)
+}
+
+async fn execute_script_result_with_trim(
+    script_path: PathBuf,
+    args: Vec<String>,
+    trim_output: bool,
+    label: &str,
+) -> Result<TmuxCommandResponse, (StatusCode, Json<ApiErrorResponse>)> {
     let command = format!("{} {}", script_path.display(), args.join(" "));
     let command_args = args.clone();
+    let label = label.to_string();
 
     let output =
         tokio::task::spawn_blocking(move || Command::new(&script_path).args(command_args).output())
             .await
-            .map_err(|error| internal_error(format!("failed to join tmux command task: {error}")))?
-            .map_err(|error| internal_error(format!("failed to execute tmux command: {error}")))?;
+            .map_err(|error| {
+                internal_error(format!("failed to join {label} command task: {error}"))
+            })?
+            .map_err(|error| {
+                internal_error(format!("failed to execute {label} command: {error}"))
+            })?;
 
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout = if trim_output {
@@ -1299,7 +1507,7 @@ async fn execute_tmux_script_result_with_trim(
         } else if !stdout_detail.is_empty() {
             stdout_detail.to_string()
         } else {
-            "tmux command failed with no output".to_string()
+            format!("{label} command failed with no output")
         };
         return Err((
             status,
@@ -1315,13 +1523,6 @@ async fn execute_tmux_script_result_with_trim(
         stdout,
         stderr,
     })
-}
-
-async fn execute_tmux_script(
-    state: &ApiState,
-    args: Vec<String>,
-) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
-    execute_tmux_script_result(state, args).await.map(Json)
 }
 
 async fn execute_codex_login_status(state: &ApiState) -> CodexAuthStatusResponse {
@@ -2479,6 +2680,195 @@ async fn post_tmux_stop_handler(
     .await
 }
 
+async fn post_jj_bootstrap_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<JjBootstrapRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let mut args = vec!["bootstrap".to_string()];
+    if let Some(remote) = request.remote {
+        validate_jj_remote(&remote)?;
+        args.push(remote);
+    }
+    execute_jj_script(&state, args).await
+}
+
+async fn post_jj_status_handler(
+    State(state): State<ApiState>,
+    Json(_request): Json<JjStatusRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_jj_script(&state, vec!["status".to_string()]).await
+}
+
+async fn post_jj_lane_add_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<JjLaneAddRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    validate_jj_lane_name(&request.lane_name)?;
+    let base_revset = request
+        .base_revset
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(base_revset) = &base_revset {
+        validate_jj_revset("base_revset", base_revset)?;
+    }
+    if let Some(destination) = &request.destination {
+        validate_jj_path_arg("destination", destination)?;
+    }
+
+    let mut args = vec!["lane-add".to_string(), request.lane_name];
+    if let Some(base_revset) = base_revset {
+        args.push(base_revset);
+    }
+    if let Some(destination) = request.destination {
+        if args.len() == 2 {
+            args.push("trunk()".to_string());
+        }
+        args.push(destination);
+    }
+
+    execute_jj_script(&state, args).await
+}
+
+async fn post_jj_lane_list_handler(
+    State(state): State<ApiState>,
+    Json(_request): Json<JjLaneListRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    execute_jj_script(&state, vec!["lane-list".to_string()]).await
+}
+
+async fn post_jj_lane_forget_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<JjLaneNameRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    validate_jj_lane_name(&request.lane_name)?;
+    execute_jj_script(&state, vec!["lane-forget".to_string(), request.lane_name]).await
+}
+
+async fn post_jj_lane_root_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<JjLaneNameRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    validate_jj_lane_name(&request.lane_name)?;
+    execute_jj_script(&state, vec!["lane-root".to_string(), request.lane_name]).await
+}
+
+async fn post_jj_patch_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<JjPatchRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    validate_jj_path_arg("output_path", &request.output_path)?;
+    if let Some(revset) = &request.revset {
+        validate_jj_revset("revset", revset)?;
+    }
+
+    let mut args = vec!["patch".to_string(), request.output_path];
+    if let Some(revset) = request.revset {
+        args.push(revset);
+    }
+    execute_jj_script(&state, args).await
+}
+
+async fn post_jj_publish_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<JjPublishRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    validate_jj_bookmark(&request.bookmark)?;
+    let revset = request
+        .revset
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(revset) = &revset {
+        validate_jj_revset("revset", revset)?;
+    }
+    let remote = request
+        .remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(remote) = &remote {
+        validate_jj_remote(remote)?;
+    }
+
+    let mut args = vec!["publish".to_string(), request.bookmark];
+    if let Some(revset) = revset {
+        args.push(revset);
+    } else if remote.is_some() {
+        args.push("@-".to_string());
+    }
+    if let Some(remote) = remote {
+        args.push(remote);
+    }
+
+    execute_jj_script(&state, args).await
+}
+
+async fn post_jj_integrate_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<JjIntegrateRequest>,
+) -> Result<Json<TmuxCommandResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    if request.good_revisions.is_empty() {
+        return Err(bad_request_error("good_revisions cannot be empty"));
+    }
+    if request.good_revisions.len() > 16 {
+        return Err(bad_request_error("good_revisions cannot exceed 16 entries"));
+    }
+    for revset in &request.good_revisions {
+        validate_jj_revset("good_revisions", revset)?;
+    }
+
+    let bad_revisions = request.bad_revisions.unwrap_or_default();
+    if bad_revisions.len() > 16 {
+        return Err(bad_request_error("bad_revisions cannot exceed 16 entries"));
+    }
+    for revset in &bad_revisions {
+        validate_jj_revset("bad_revisions", revset)?;
+    }
+
+    let base_revset = request
+        .base_revset
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(base_revset) = &base_revset {
+        validate_jj_revset("base_revset", base_revset)?;
+    }
+    let message = request
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(message) = &message {
+        validate_jj_message(message)?;
+    }
+
+    let mut args = vec!["integrate".to_string()];
+    if let Some(base_revset) = base_revset {
+        args.push("--base".to_string());
+        args.push(base_revset);
+    }
+    for revset in request.good_revisions {
+        args.push("--good".to_string());
+        args.push(revset);
+    }
+    for revset in bad_revisions {
+        args.push("--bad".to_string());
+        args.push(revset);
+    }
+    if let Some(message) = message {
+        args.push("--message".to_string());
+        args.push(message);
+    }
+
+    execute_jj_script(&state, args).await
+}
+
 async fn get_tasks_handler(State(state): State<ApiState>) -> Json<Vec<TaskResponse>> {
     let api = state.api.read().expect("api lock should be readable");
     Json(api.get_tasks())
@@ -3543,6 +3933,7 @@ mod tests {
             store,
             PathBuf::from("scripts/trace-smoke-tmux.sh"),
             write_logged_in_codex_script(root),
+            PathBuf::from("scripts/trace-jj.sh"),
         )
     }
 
@@ -3556,6 +3947,23 @@ mod tests {
             store,
             tmux_script_path,
             write_logged_in_codex_script(root),
+            PathBuf::from("scripts/trace-jj.sh"),
+        )
+    }
+
+    fn build_test_app_with_jj_script(
+        root: &std::path::Path,
+        store: &EventStore,
+        jj_script_path: PathBuf,
+    ) -> axum::Router {
+        let tmux_script_path = root.join("tmux-unused.sh");
+        write_executable_script(&tmux_script_path, "#!/usr/bin/env bash\nexit 0\n");
+        build_test_app_with_orchestration_bins(
+            root,
+            store,
+            tmux_script_path,
+            write_logged_in_codex_script(root),
+            jj_script_path,
         )
     }
 
@@ -3564,12 +3972,14 @@ mod tests {
         store: &EventStore,
         tmux_script_path: PathBuf,
         codex_bin_path: PathBuf,
+        jj_script_path: PathBuf,
     ) -> axum::Router {
         build_test_app_with_orchestration_policy(
             root,
             store,
             tmux_script_path,
             codex_bin_path,
+            jj_script_path,
             CodexAuthPolicy::Required,
         )
     }
@@ -3579,6 +3989,7 @@ mod tests {
         store: &EventStore,
         tmux_script_path: PathBuf,
         codex_bin_path: PathBuf,
+        jj_script_path: PathBuf,
         codex_auth_policy: CodexAuthPolicy,
     ) -> axum::Router {
         build_test_app_with_orchestration_policy_and_history_limit(
@@ -3586,6 +3997,7 @@ mod tests {
             store,
             tmux_script_path,
             codex_bin_path,
+            jj_script_path,
             codex_auth_policy,
             DEFAULT_SMOKE_RUN_HISTORY_LIMIT,
         )
@@ -3596,6 +4008,7 @@ mod tests {
         store: &EventStore,
         tmux_script_path: PathBuf,
         codex_bin_path: PathBuf,
+        jj_script_path: PathBuf,
         codex_auth_policy: CodexAuthPolicy,
         smoke_run_history_limit: usize,
     ) -> axum::Router {
@@ -3620,6 +4033,7 @@ mod tests {
             lease_store,
             replay_store,
             tmux_script_path,
+            jj_script_path,
             codex_bin_path,
             codex_auth_policy,
             smoke_run_history_limit,
@@ -3945,6 +4359,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_jj_bootstrap_route_invokes_configured_script_with_expected_args() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("jj_args.log");
+        let jj_script_path = root.join("jj-ok.sh");
+        write_executable_script(
+            &jj_script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"jj-ready\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_jj_script(&root, &store, jj_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/jj/bootstrap")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "remote": "origin" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let parsed: Value = serde_json::from_slice(&body).expect("response should parse");
+        assert_eq!(parsed["exit_code"].as_i64(), Some(0));
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("bootstrap origin"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_jj_lane_add_rejects_invalid_lane_name() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let jj_script_path = root.join("jj-unused.sh");
+        write_executable_script(&jj_script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_jj_script(&root, &store, jj_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/jj/lane-add")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lane_name": "bad lane"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_jj_integrate_forwards_good_bad_and_message_args() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let args_log_path = root.join("jj_args.log");
+        let jj_script_path = root.join("jj-ok.sh");
+        write_executable_script(
+            &jj_script_path,
+            &format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"integrated\"\n",
+                args_log_path.display()
+            ),
+        );
+        let app = build_test_app_with_jj_script(&root, &store, jj_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/jj/integrate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "base_revset": "trunk()",
+                            "good_revisions": ["good-a", "good-b"],
+                            "bad_revisions": ["bad-a"],
+                            "message": "feat: integrate good lanes"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let logged_args = fs::read_to_string(&args_log_path).expect("args log should be readable");
+        assert!(logged_args.contains("integrate --base trunk()"));
+        assert!(logged_args.contains("--good good-a"));
+        assert!(logged_args.contains("--good good-b"));
+        assert!(logged_args.contains("--bad bad-a"));
+        assert!(logged_args.contains("--message feat: integrate good lanes"));
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_jj_integrate_requires_good_revisions() {
+        let root = unique_temp_root();
+        let store = seed_event_log(&root);
+        let jj_script_path = root.join("jj-unused.sh");
+        write_executable_script(&jj_script_path, "#!/usr/bin/env bash\nexit 0\n");
+        let app = build_test_app_with_jj_script(&root, &store, jj_script_path);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orchestrator/jj/integrate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "good_revisions": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[tokio::test]
     async fn test_smoke_run_workflow_completes_and_writes_report() {
         let root = unique_temp_root();
         let store = seed_event_log(&root);
@@ -4253,6 +4810,7 @@ mod tests {
             &store,
             tmux_script_path,
             write_logged_in_codex_script(&root),
+            PathBuf::from("scripts/trace-jj.sh"),
             CodexAuthPolicy::Required,
             1,
         );
@@ -4694,6 +5252,7 @@ mod tests {
             &store,
             tmux_script_path,
             codex_script_path,
+            PathBuf::from("scripts/trace-jj.sh"),
             CodexAuthPolicy::Required,
         );
 
@@ -4756,6 +5315,7 @@ mod tests {
             &store,
             tmux_script_path,
             codex_script_path,
+            PathBuf::from("scripts/trace-jj.sh"),
             CodexAuthPolicy::Optional,
         );
 
@@ -5198,6 +5758,7 @@ mod tests {
             &store,
             tmux_script_path,
             codex_script_path.clone(),
+            PathBuf::from("scripts/trace-jj.sh"),
         );
 
         let response = app
@@ -5235,8 +5796,13 @@ mod tests {
         let tmux_script_path = root.join("tmux-unused.sh");
         write_executable_script(&tmux_script_path, "#!/usr/bin/env bash\nexit 0\n");
         let missing_codex = root.join("missing-codex-bin");
-        let app =
-            build_test_app_with_orchestration_bins(&root, &store, tmux_script_path, missing_codex);
+        let app = build_test_app_with_orchestration_bins(
+            &root,
+            &store,
+            tmux_script_path,
+            missing_codex,
+            PathBuf::from("scripts/trace-jj.sh"),
+        );
 
         let response = app
             .oneshot(

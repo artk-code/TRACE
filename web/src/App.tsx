@@ -16,6 +16,15 @@ import {
   fetchReports,
   fetchRunOutput,
   fetchAgentRun,
+  postJjBootstrap,
+  postJjIntegrate,
+  postJjLaneAdd,
+  postJjLaneForget,
+  postJjLaneList,
+  postJjLaneRoot,
+  postJjPatch,
+  postJjPublish,
+  postJjStatus,
   fetchTasks,
   postAgentRun,
   postTmuxAddLane,
@@ -52,6 +61,13 @@ function parseProfilesInput(value: string): string[] | undefined {
     .map((part) => part.trim())
     .filter((part) => part !== "");
   return profiles.length > 0 ? profiles : undefined;
+}
+
+function parseCsvInput(value: string): string[] {
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
 }
 
 function isAgentTerminal(status: AgentRunResponse["status"]): boolean {
@@ -121,6 +137,25 @@ export default function App() {
   const [paneInputError, setPaneInputError] = useState<string | null>(null);
   const [paneInputLastAction, setPaneInputLastAction] = useState<string | null>(null);
   const panePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [jjRemote, setJjRemote] = useState("origin");
+  const [jjLaneName, setJjLaneName] = useState("codex-a");
+  const [jjLaneBaseRevset, setJjLaneBaseRevset] = useState("trunk()");
+  const [jjLaneDestination, setJjLaneDestination] = useState("");
+  const [jjLaneManageName, setJjLaneManageName] = useState("codex-a");
+  const [jjPatchPath, setJjPatchPath] = useState("/tmp/trace-agent.patch");
+  const [jjPatchRevset, setJjPatchRevset] = useState("@-");
+  const [jjPublishBookmark, setJjPublishBookmark] = useState("agent/codex-a/feature");
+  const [jjPublishRevset, setJjPublishRevset] = useState("@-");
+  const [jjPublishRemote, setJjPublishRemote] = useState("origin");
+  const [jjIntegrateBaseRevset, setJjIntegrateBaseRevset] = useState("trunk()");
+  const [jjIntegrateGoodRevisions, setJjIntegrateGoodRevisions] = useState("");
+  const [jjIntegrateBadRevisions, setJjIntegrateBadRevisions] = useState("");
+  const [jjIntegrateMessage, setJjIntegrateMessage] = useState(
+    "feat: integrate selected agent revisions",
+  );
+  const [jjBusy, setJjBusy] = useState<string | null>(null);
+  const [jjError, setJjError] = useState<string | null>(null);
+  const [jjResult, setJjResult] = useState<TmuxCommandResponse | null>(null);
 
   const tasksQuery = useQuery({
     queryKey: ["tasks"],
@@ -180,6 +215,19 @@ export default function App() {
       setOrchestrationError((error as Error).message);
     } finally {
       setOrchestrationBusy(null);
+    }
+  }
+
+  async function runJjAction(actionName: string, action: () => Promise<TmuxCommandResponse>): Promise<void> {
+    setJjBusy(actionName);
+    setJjError(null);
+    try {
+      const result = await action();
+      setJjResult(result);
+    } catch (error) {
+      setJjError((error as Error).message);
+    } finally {
+      setJjBusy(null);
     }
   }
 
@@ -709,6 +757,244 @@ export default function App() {
             <pre className="trace-console">{JSON.stringify(orchestrationResult, null, 2)}</pre>
           ) : (
             <pre className="trace-console">No orchestration command executed yet.</pre>
+          )}
+        </section>
+
+        <section className="trace-panel trace-panel-wide">
+          <h2>JJ Workflow</h2>
+          <p>Run multi-agent workspace and integration actions through scripts/trace-jj.sh from the UI.</p>
+          <div className="trace-button-row">
+            <button
+              className="trace-btn trace-btn-primary"
+              onClick={() =>
+                void runJjAction("bootstrap", () =>
+                  postJjBootstrap({
+                    remote: optionalValue(jjRemote),
+                  }),
+                )
+              }
+              disabled={Boolean(jjBusy)}
+            >
+              JJ Bootstrap
+            </button>
+            <button
+              className="trace-btn"
+              onClick={() => void runJjAction("status", () => postJjStatus({}))}
+              disabled={Boolean(jjBusy)}
+            >
+              JJ Status
+            </button>
+            <button
+              className="trace-btn"
+              onClick={() => void runJjAction("lane-list", () => postJjLaneList({}))}
+              disabled={Boolean(jjBusy)}
+            >
+              Lane List
+            </button>
+          </div>
+          <fieldset className="trace-fieldset" disabled={Boolean(jjBusy)}>
+            <div className="trace-inline-grid">
+              <h3>Lane Workspace</h3>
+              <label className="trace-field">
+                Remote:
+                <input value={jjRemote} onChange={(event) => setJjRemote(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Lane Name:
+                <input value={jjLaneName} onChange={(event) => setJjLaneName(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Base Revset:
+                <input
+                  value={jjLaneBaseRevset}
+                  onChange={(event) => setJjLaneBaseRevset(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Destination (optional):
+                <input
+                  value={jjLaneDestination}
+                  placeholder=".workspaces/codex-a"
+                  onChange={(event) => setJjLaneDestination(event.target.value)}
+                />
+              </label>
+              <button
+                className="trace-btn"
+                onClick={() =>
+                  void runJjAction("lane-add", () =>
+                    postJjLaneAdd({
+                      lane_name: jjLaneName.trim(),
+                      base_revset: optionalValue(jjLaneBaseRevset),
+                      destination: optionalValue(jjLaneDestination),
+                    }),
+                  )
+                }
+                disabled={Boolean(jjBusy)}
+              >
+                Lane Add
+              </button>
+            </div>
+
+            <div className="trace-inline-grid">
+              <h3>Lane Lookup</h3>
+              <label className="trace-field">
+                Lane Name:
+                <input
+                  value={jjLaneManageName}
+                  onChange={(event) => setJjLaneManageName(event.target.value)}
+                />
+              </label>
+              <button
+                className="trace-btn"
+                onClick={() =>
+                  void runJjAction("lane-root", () =>
+                    postJjLaneRoot({
+                      lane_name: jjLaneManageName.trim(),
+                    }),
+                  )
+                }
+                disabled={Boolean(jjBusy)}
+              >
+                Lane Root
+              </button>
+              <button
+                className="trace-btn"
+                onClick={() =>
+                  void runJjAction("lane-forget", () =>
+                    postJjLaneForget({
+                      lane_name: jjLaneManageName.trim(),
+                    }),
+                  )
+                }
+                disabled={Boolean(jjBusy)}
+              >
+                Lane Forget
+              </button>
+            </div>
+
+            <div className="trace-inline-grid">
+              <h3>Patch / Publish</h3>
+              <label className="trace-field">
+                Patch Path:
+                <input value={jjPatchPath} onChange={(event) => setJjPatchPath(event.target.value)} />
+              </label>
+              <label className="trace-field">
+                Patch Revset:
+                <input value={jjPatchRevset} onChange={(event) => setJjPatchRevset(event.target.value)} />
+              </label>
+              <button
+                className="trace-btn"
+                onClick={() =>
+                  void runJjAction("patch", () =>
+                    postJjPatch({
+                      output_path: jjPatchPath.trim(),
+                      revset: optionalValue(jjPatchRevset),
+                    }),
+                  )
+                }
+                disabled={Boolean(jjBusy)}
+              >
+                Export Patch
+              </button>
+              <label className="trace-field">
+                Bookmark:
+                <input
+                  value={jjPublishBookmark}
+                  onChange={(event) => setJjPublishBookmark(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Publish Revset:
+                <input
+                  value={jjPublishRevset}
+                  onChange={(event) => setJjPublishRevset(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Publish Remote:
+                <input
+                  value={jjPublishRemote}
+                  onChange={(event) => setJjPublishRemote(event.target.value)}
+                />
+              </label>
+              <button
+                className="trace-btn"
+                onClick={() =>
+                  void runJjAction("publish", () =>
+                    postJjPublish({
+                      bookmark: jjPublishBookmark.trim(),
+                      revset: optionalValue(jjPublishRevset),
+                      remote: optionalValue(jjPublishRemote),
+                    }),
+                  )
+                }
+                disabled={Boolean(jjBusy)}
+              >
+                Publish
+              </button>
+            </div>
+
+            <div className="trace-inline-grid">
+              <h3>Integrate Selected Revisions</h3>
+              <label className="trace-field">
+                Base Revset:
+                <input
+                  value={jjIntegrateBaseRevset}
+                  onChange={(event) => setJjIntegrateBaseRevset(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Good Revisions (comma-separated):
+                <input
+                  value={jjIntegrateGoodRevisions}
+                  placeholder="good-a,good-b"
+                  onChange={(event) => setJjIntegrateGoodRevisions(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Bad Revisions (comma-separated):
+                <input
+                  value={jjIntegrateBadRevisions}
+                  placeholder="bad-a"
+                  onChange={(event) => setJjIntegrateBadRevisions(event.target.value)}
+                />
+              </label>
+              <label className="trace-field">
+                Commit Message:
+                <input
+                  value={jjIntegrateMessage}
+                  onChange={(event) => setJjIntegrateMessage(event.target.value)}
+                />
+              </label>
+              <button
+                className="trace-btn"
+                onClick={() => {
+                  const goodRevisions = parseCsvInput(jjIntegrateGoodRevisions);
+                  if (goodRevisions.length === 0) {
+                    setJjError("Provide at least one good revision before integrate");
+                    return;
+                  }
+                  void runJjAction("integrate", () =>
+                    postJjIntegrate({
+                      base_revset: optionalValue(jjIntegrateBaseRevset),
+                      good_revisions: goodRevisions,
+                      bad_revisions: parseCsvInput(jjIntegrateBadRevisions),
+                      message: optionalValue(jjIntegrateMessage),
+                    }),
+                  );
+                }}
+                disabled={Boolean(jjBusy)}
+              >
+                Integrate
+              </button>
+            </div>
+          </fieldset>
+          {jjBusy ? <p className="trace-note">Running jj action: {jjBusy}</p> : null}
+          {jjError ? <p className="trace-error">JJ action failed: {jjError}</p> : null}
+          {jjResult ? (
+            <pre className="trace-console">{JSON.stringify(jjResult, null, 2)}</pre>
+          ) : (
+            <pre className="trace-console">No jj command executed yet.</pre>
           )}
         </section>
 

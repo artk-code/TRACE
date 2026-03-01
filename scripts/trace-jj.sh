@@ -41,6 +41,10 @@ Commands:
   publish <bookmark> [revset] [remote]
       Set bookmark to revision (default: @-) and push it (default remote: $DEFAULT_REMOTE).
 
+  integrate [--base <revset>] --good <revset> [--good <revset> ...] [--bad <revset> ...] [--message <text>]
+      Create a new integration change from selected good revisions and optionally abandon bad revisions.
+      Defaults: --base trunk(), --message "feat: integrate selected agent revisions".
+
   help
       Show this message.
 
@@ -51,6 +55,7 @@ Examples:
   $0 status
   $0 patch /tmp/codex-a.patch @-
   $0 publish agent/codex-a/feature @- origin
+  $0 integrate --base trunk() --good qpwmx --good ynmrk --bad badrev --message "feat: merge good lanes"
 EOF
 }
 
@@ -239,6 +244,88 @@ publish_cmd() {
   echo "published bookmark '$bookmark' at revset '$revset' to remote '$remote'"
 }
 
+integrate_cmd() {
+  require_jj
+  ensure_jj_repo
+
+  local base_revset="trunk()"
+  local message="feat: integrate selected agent revisions"
+  local -a good_revsets=()
+  local -a bad_revsets=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --base" >&2
+          exit 2
+        fi
+        base_revset="$2"
+        shift 2
+        ;;
+      --good)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --good" >&2
+          exit 2
+        fi
+        good_revsets+=("$2")
+        shift 2
+        ;;
+      --bad)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --bad" >&2
+          exit 2
+        fi
+        bad_revsets+=("$2")
+        shift 2
+        ;;
+      --message)
+        if [[ $# -lt 2 ]]; then
+          echo "missing value for --message" >&2
+          exit 2
+        fi
+        message="$2"
+        shift 2
+        ;;
+      *)
+        echo "unknown integrate option: $1" >&2
+        echo "usage: $0 integrate [--base <revset>] --good <revset> [--good <revset> ...] [--bad <revset> ...] [--message <text>]" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ ${#good_revsets[@]} -eq 0 ]]; then
+    echo "integrate requires at least one --good <revset>" >&2
+    exit 2
+  fi
+
+  jj new "$base_revset" -m "$message"
+  for revset in "${good_revsets[@]}"; do
+    jj squash --from "$revset" --into @ --use-destination-message
+  done
+
+  if [[ ${#bad_revsets[@]} -gt 0 ]]; then
+    jj abandon "${bad_revsets[@]}"
+  fi
+
+  local bad_label="none"
+  if [[ ${#bad_revsets[@]} -gt 0 ]]; then
+    bad_label="${bad_revsets[*]}"
+  fi
+
+  cat <<EOF
+integration complete:
+  base: $base_revset
+  good: ${good_revsets[*]}
+  bad_abandoned: $bad_label
+
+next:
+  jj st
+  $0 publish <bookmark> @ origin
+EOF
+}
+
 command_name="${1:-help}"
 shift || true
 
@@ -266,6 +353,9 @@ case "$command_name" in
     ;;
   publish)
     publish_cmd "$@"
+    ;;
+  integrate)
+    integrate_cmd "$@"
     ;;
   help|-h|--help)
     usage

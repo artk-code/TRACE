@@ -9,8 +9,8 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
 ## Target Flow (Web-Driven)
 1. Verify Codex auth status from web.
    - When `policy=required`, require `available=true` and `logged_in=true`.
-2. Trigger smoke workflow via `POST /smoke/runs`.
-3. Poll `GET /smoke/runs/{run_id}` until terminal state.
+2. Trigger smoke workflow via `POST /agent/runs` (legacy alias: `/smoke/runs`).
+3. Poll `GET /agent/runs/{run_id}` until terminal state.
 4. Execute scripted lane runners (no manual terminal copy/paste).
 5. Emit typed write events:
    - claim, run start, output, candidate, release
@@ -28,19 +28,21 @@ From a browser UI, run a multi-lane session (Flash/High/Extra), capture trace ev
 - Runner mode executes typed writes + `verdict.recorded` automatically.
 - Benchmark generation endpoint (`POST /benchmarks/evaluate`) writing JSON/Markdown artifacts.
 - Smoke workflow endpoints are active:
-  - `POST /smoke/runs`
-  - `GET /smoke/runs/{run_id}`
+  - `POST /agent/runs` (legacy alias: `/smoke/runs`)
+  - `GET /agent/runs/{run_id}` (legacy alias: `/smoke/runs/{run_id}`)
   - preflights session/target and writes benchmark summary on completion
 - Report retrieval endpoints are active:
   - `GET /reports`
   - `GET /reports/{report_id}`
 - Web UI smoke/report flow is active:
-  - run smoke
+  - run agents
   - poll status
   - view latest report summary
 - Browser E2E smoke is active:
   - Playwright baseline for auth check -> smoke run -> report visible
   - CI runs `pnpm --dir web test:e2e`
+- Browser JJ workflow panel is active:
+  - bootstrap/status/lane management/patch/publish/integrate actions via `/orchestrator/jj/*`
 
 ## Confirmed Gaps
 - Human QA sign-off artifacts for a real shared-server run are not yet recorded.

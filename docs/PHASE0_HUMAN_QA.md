@@ -5,7 +5,7 @@ Date: 2026-03-01
 ## Goal
 Validate the real (non-mocked) browser smoke path on one shared TRACE server/root:
 1. Auth check in browser.
-2. Smoke run trigger + polling.
+2. Agent run trigger + polling.
 3. Report retrieval and in-browser rendering.
 
 ## Prerequisites
@@ -40,7 +40,7 @@ scripts/trace-smoke-tmux.sh --session trace-smoke validate-target trace-smoke:la
 1. Open `http://127.0.0.1:4173`.
 2. In UI, click `Check Codex Auth`.
    - Expect `policy=required`, `available=true`, `logged_in=true`.
-3. In UI, click `Run Smoke`.
+3. In UI, click `Run Agents`.
    - Expect `run_id` appears.
    - Expect status reaches terminal (`succeeded` or `failed`) via auto-poll.
 4. In UI, click `View Latest Report`.
@@ -49,7 +49,7 @@ scripts/trace-smoke-tmux.sh --session trace-smoke validate-target trace-smoke:la
 5. Save smoke/report artifacts:
 ```bash
 RUN_ID="<replace-with-ui-run-id>"
-curl -sS "http://127.0.0.1:18086/smoke/runs/$RUN_ID" | tee /tmp/trace-smoke-run.json | jq .
+curl -sS "http://127.0.0.1:18086/agent/runs/$RUN_ID" | tee /tmp/trace-smoke-run.json | jq .
 curl -sS "http://127.0.0.1:18086/reports?limit=1" | tee /tmp/trace-reports-latest.json | jq .
 ```
 6. Append run results to `docs/PHASE0_SIGNOFF.md`.
@@ -57,11 +57,11 @@ curl -sS "http://127.0.0.1:18086/reports?limit=1" | tee /tmp/trace-reports-lates
 ## Negative/Failure Checks
 1. Invalid target preflight:
    - In UI smoke target field set a bad target (example: `trace-smoke:missing`).
-   - Click `Run Smoke`.
+   - Click `Run Agents`.
    - Expect actionable error mentioning `validate-target`.
 2. Missing session preflight:
    - Stop session (`scripts/trace-smoke-tmux.sh --session trace-smoke stop`).
-   - Click `Run Smoke`.
+   - Click `Run Agents`.
    - Expect actionable error mentioning `status` preflight/session.
 
 ## Pass Criteria

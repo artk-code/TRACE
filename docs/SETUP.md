@@ -137,7 +137,22 @@ curl -sS -X POST http://127.0.0.1:18086/orchestrator/tmux/send-keys \
   -d '{"session":"trace-smoke","target":"trace-smoke:lanes.0","text":"echo linux-proof","press_enter":true}' | jq .
 ```
 
-5. Trigger and poll agent run:
+5. Verify jj orchestration endpoints:
+```bash
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/jj/bootstrap \
+  -H 'content-type: application/json' \
+  -d '{"remote":"origin"}' | jq .
+
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/jj/status \
+  -H 'content-type: application/json' \
+  -d '{}' | jq .
+
+curl -sS -X POST http://127.0.0.1:18086/orchestrator/jj/integrate \
+  -H 'content-type: application/json' \
+  -d '{"base_revset":"trunk()","good_revisions":["good-a","good-b"],"bad_revisions":["bad-a"],"message":"feat: integrate selected agent revisions"}' | jq .
+```
+
+6. Trigger and poll agent run:
 ```bash
 RUN_ID="$(curl -sS -X POST http://127.0.0.1:18086/agent/runs \
   -H 'content-type: application/json' \
@@ -152,7 +167,7 @@ while true; do
 done
 ```
 
-6. Stop tmux session when done:
+7. Stop tmux session when done:
 ```bash
 scripts/trace-smoke-tmux.sh --session trace-smoke stop
 ```

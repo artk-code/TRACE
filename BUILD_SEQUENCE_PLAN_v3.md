@@ -24,19 +24,22 @@ Ship a browser-driven, repeatable smoketest where multiple lanes (Flash/High/Ext
    - tmux add-lane/add-pane accept `mode=interactive|runner`
    - runner mode emits claim/run/output/candidate/verdict/release automatically
 9. Smoke workflow API is implemented:
-   - `POST /smoke/runs`
-   - `GET /smoke/runs/{run_id}`
+   - `POST /agent/runs` (legacy alias: `POST /smoke/runs`)
+   - `GET /agent/runs/{run_id}` (legacy alias: `GET /smoke/runs/{run_id}`)
    - preflights tmux session/target, scopes events by smoke lanes, writes benchmark report at completion
 10. Report retrieval APIs are implemented:
    - `GET /reports`
    - `GET /reports/{report_id}`
 11. Web UI smoke/report flow is implemented:
-   - `Run Smoke`
+   - `Run Agents`
    - `Refresh Status`
    - `View Latest Report`
 12. Browser E2E smoke is implemented and CI-gated:
    - `web/tests/phase0-smoke.spec.ts`
    - `.github/workflows/ci.yml` runs `pnpm test:e2e`
+13. Browser JJ workflow controls are implemented:
+   - `POST /orchestrator/jj/bootstrap|status|lane-add|lane-list|lane-forget|lane-root|patch|publish|integrate`
+   - UI `JJ Workflow` panel executes `scripts/trace-jj.sh` via backend routes
 
 ## Execution Sequence
 1. Phase 0 human QA sign-off.

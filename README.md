@@ -71,6 +71,7 @@ cd .workspaces/codex-a
 jj commit -m "agent(codex-a): implement slice"
 scripts/trace-jj.sh patch /tmp/codex-a.patch @-
 scripts/trace-jj.sh publish agent/codex-a/slice @- origin
+scripts/trace-jj.sh integrate --base trunk() --good good-a --good good-b --bad bad-a --message "feat: integrate selected agent revisions"
 ```
 
 Full workflow guide:
@@ -144,6 +145,12 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
      - `Task Count` + `Task Prefix`
      - `Input Source` (`predefined` or `human`) with optional `Human Prompt`
    - `View Latest Report` (uses `GET /reports` + `GET /reports/{report_id}`)
+6. Use the **JJ Workflow** section:
+   - `JJ Bootstrap` (`POST /orchestrator/jj/bootstrap`)
+   - `JJ Status` (`POST /orchestrator/jj/status`)
+   - lane controls: `Lane Add`, `Lane List`, `Lane Root`, `Lane Forget`
+   - patch controls: `Export Patch`, `Publish`
+   - integration control: `Integrate` (good revision list + optional bad revisions)
 
 ## Web UI Status (2026-03-01)
 - Current UI supports:
@@ -160,6 +167,9 @@ VITE_TRACE_API_BASE_URL=http://127.0.0.1:18086 pnpm --dir web dev --host 127.0.0
     - `Task Count`, `Task Prefix`
     - `Input Source` (`predefined|human`) and optional `Human Prompt`
   - Report retrieval/rendering flow (`View Latest Report`) with model summary table.
+  - JJ workflow controls:
+    - `bootstrap`, `status`, `lane-add`, `lane-list`, `lane-forget`, `lane-root`
+    - `patch`, `publish`, `integrate`
   - Read-only task/candidate/output views.
   - Playwright smoke baseline for auth -> agent run -> report flow.
   - Live pane-input proof screenshot:
@@ -369,6 +379,69 @@ Success response:
 - Missing report returns HTTP `404`.
 - Invalid `report_id` format returns HTTP `400`.
 
+## JJ Orchestration API Contract
+All JJ orchestration routes execute `scripts/trace-jj.sh` (or override with `TRACE_JJ_ORCH_SCRIPT`).
+
+`POST /orchestrator/jj/bootstrap`
+- Request JSON:
+  - `remote` optional token (`origin` default in script).
+- Behavior:
+  - Runs `scripts/trace-jj.sh bootstrap [remote]`.
+
+`POST /orchestrator/jj/status`
+- Request JSON: `{}`
+- Behavior:
+  - Runs `scripts/trace-jj.sh status`.
+
+`POST /orchestrator/jj/lane-add`
+- Request JSON:
+  - `lane_name` required token (`[A-Za-z0-9._-]+`)
+  - `base_revset` optional revset string
+  - `destination` optional path string
+- Behavior:
+  - Runs `scripts/trace-jj.sh lane-add <lane_name> [base_revset] [destination]`.
+
+`POST /orchestrator/jj/lane-list`
+- Request JSON: `{}`
+- Behavior:
+  - Runs `scripts/trace-jj.sh lane-list`.
+
+`POST /orchestrator/jj/lane-forget`
+- Request JSON:
+  - `lane_name` required token (`[A-Za-z0-9._-]+`)
+- Behavior:
+  - Runs `scripts/trace-jj.sh lane-forget <lane_name>`.
+
+`POST /orchestrator/jj/lane-root`
+- Request JSON:
+  - `lane_name` required token (`[A-Za-z0-9._-]+`)
+- Behavior:
+  - Runs `scripts/trace-jj.sh lane-root <lane_name>`.
+
+`POST /orchestrator/jj/patch`
+- Request JSON:
+  - `output_path` required path
+  - `revset` optional revset (`@-` default in script)
+- Behavior:
+  - Runs `scripts/trace-jj.sh patch <output_path> [revset]`.
+
+`POST /orchestrator/jj/publish`
+- Request JSON:
+  - `bookmark` required token (`[A-Za-z0-9._/-]+`)
+  - `revset` optional revset
+  - `remote` optional token (`origin` default in script)
+- Behavior:
+  - Runs `scripts/trace-jj.sh publish <bookmark> [revset] [remote]`.
+
+`POST /orchestrator/jj/integrate`
+- Request JSON:
+  - `base_revset` optional revset (`trunk()` default in script)
+  - `good_revisions` required array (min 1, max 16)
+  - `bad_revisions` optional array (max 16)
+  - `message` optional text (max 4000 chars)
+- Behavior:
+  - Runs `scripts/trace-jj.sh integrate --good ...` and composes selected good revisions into one integration change.
+
 ## API Smoke (No Browser)
 ```bash
 curl -sS http://127.0.0.1:18086/orchestrator/auth/codex/status | jq .
@@ -435,6 +508,10 @@ Note:
   - invalid `target` token or `lines` outside `[1, 5000]`.
 - `400 Bad Request` from `POST /orchestrator/tmux/send-keys`:
   - missing input action (`text`/`key`/`press_enter=true`), invalid `key`, or oversized/empty `text`.
+- `400 Bad Request` from `/orchestrator/jj/*` routes:
+  - invalid `lane_name`/`bookmark` token format, empty revset arrays, or invalid control characters.
+- `409 Conflict` from `/orchestrator/jj/*` routes:
+  - script-level command conflict (for example existing workspace destination, publish safety check, or missing remote state).
 - `409 Conflict` mentioning `history limit reached`:
   - increase `TRACE_SMOKE_RUN_HISTORY_LIMIT` or wait for terminal runs to be pruned.
 - `400 Bad Request` on smoke start:
@@ -455,14 +532,16 @@ Note:
 - tmux pane input API is implemented:
   - `POST /orchestrator/tmux/send-keys`
 - jj multi-agent patch helper is implemented:
-  - `scripts/trace-jj.sh` (`bootstrap`, `lane-add`, `lane-list`, `patch`, `publish`)
+  - `scripts/trace-jj.sh` (`bootstrap`, `status`, `lane-add`, `lane-list`, `lane-forget`, `lane-root`, `patch`, `publish`, `integrate`)
+- jj orchestration API routes are implemented:
+  - `POST /orchestrator/jj/bootstrap|status|lane-add|lane-list|lane-forget|lane-root|patch|publish|integrate`
 - Smoke workflow API is implemented:
   - `POST /agent/runs` (legacy alias: `/smoke/runs`)
   - `GET /agent/runs/{run_id}` (legacy alias: `/smoke/runs/{run_id}`)
 - Report retrieval APIs are implemented:
   - `GET /reports`
   - `GET /reports/{report_id}`
-- Web UI now supports tmux pane browsing + live capture + pane input send, agent run trigger/poll, and latest report retrieval/rendering.
+- Web UI now supports tmux pane browsing + live capture + pane input send, JJ workflow controls, agent run trigger/poll, and latest report retrieval/rendering.
 - Playwright E2E smoke is implemented and CI-gated.
 - Phase 0 sign-off artifacts are tracked under:
   - [docs/PHASE0_SIGNOFF.md](/Users/artk/Documents/GitHub/TRACE/docs/PHASE0_SIGNOFF.md)

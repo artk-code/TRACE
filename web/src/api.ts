@@ -71,6 +71,40 @@ export type TmuxAddPaneRequest = {
   runner_timeout_sec?: number;
 };
 
+export type JjBootstrapRequest = {
+  remote?: string;
+};
+
+export type JjStatusRequest = Record<string, never>;
+
+export type JjLaneAddRequest = {
+  lane_name: string;
+  base_revset?: string;
+  destination?: string;
+};
+
+export type JjLaneNameRequest = {
+  lane_name: string;
+};
+
+export type JjPatchRequest = {
+  output_path: string;
+  revset?: string;
+};
+
+export type JjPublishRequest = {
+  bookmark: string;
+  revset?: string;
+  remote?: string;
+};
+
+export type JjIntegrateRequest = {
+  base_revset?: string;
+  good_revisions: string[];
+  bad_revisions?: string[];
+  message?: string;
+};
+
 export type AgentRunStartRequest = {
   session?: string;
   profiles?: string[];
@@ -201,6 +235,51 @@ export async function postTmuxAddPane(request: TmuxAddPaneRequest): Promise<Tmux
 
 export async function postTmuxStop(request: TmuxSessionRequest): Promise<TmuxCommandResponse> {
   const raw = await postJson("/orchestrator/tmux/stop", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjBootstrap(request: JjBootstrapRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/bootstrap", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjStatus(request: JjStatusRequest = {}): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/status", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjLaneAdd(request: JjLaneAddRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/lane-add", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjLaneList(request: JjStatusRequest = {}): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/lane-list", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjLaneForget(request: JjLaneNameRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/lane-forget", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjLaneRoot(request: JjLaneNameRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/lane-root", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjPatch(request: JjPatchRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/patch", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjPublish(request: JjPublishRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/publish", request);
+  return parseTmuxCommandResponse(raw);
+}
+
+export async function postJjIntegrate(request: JjIntegrateRequest): Promise<TmuxCommandResponse> {
+  const raw = await postJson("/orchestrator/jj/integrate", request);
   return parseTmuxCommandResponse(raw);
 }
 
